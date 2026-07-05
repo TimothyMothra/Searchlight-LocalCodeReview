@@ -388,7 +388,11 @@ export class SearchlightCommentController implements vscode.Disposable {
 			bits.push(thread.tags.map((t) => `#${t}`).join(' '));
 		}
 		bits.push(thread.state === 'resolved' ? '✓ resolved' : 'unresolved');
-		return bits.join('  ·  ');
+		// VS Code hardcodes the reply box to "Reply..." and ignores CommentController.options.placeHolder
+		// there (microsoft/vscode#110348). The thread label is the only surface that can hint the reply
+		// box, so append a compact reminder of the `/tag` autocomplete. Only appended — existing
+		// file:line / status content is preserved.
+		return bits.join('  ·  ') + ' · type / for tags';
 	}
 
 	private toComment(model: ReviewComment): vscode.Comment {

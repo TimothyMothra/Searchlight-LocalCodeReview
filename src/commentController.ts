@@ -87,6 +87,13 @@ export class SearchlightCommentController implements vscode.Disposable {
 			'searchlight',
 			'Searchlight Reviews',
 		);
+		// Greyed-out placeholder in BOTH the new-thread and reply input boxes. Setting it on the
+		// controller's `options` covers every thread the controller owns, so it reminds the user of
+		// the `/tag` autocomplete (see tagCompletion.ts) without any extra helper UI.
+		this.controller.options = {
+			placeHolder: 'Type / to add tags (idea, question, bug, change, todo)…',
+			prompt: 'Type / to add tags (idea, question, bug, change, todo)…',
+		};
 		// Allow starting a new comment thread on any line of any file.
 		this.controller.commentingRangeProvider = {
 			provideCommentingRanges: (document) => {

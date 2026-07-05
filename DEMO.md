@@ -51,6 +51,44 @@ Both anchor files (`SCOPING.md`, `README.md`) exist at the repo root, so both th
 
 ---
 
+## Screenshot dataset — `scripts\demo-setup.ps1` (one command)  📸
+
+To capture the README screenshot (`docs/images/screenshot.png`) from a clean, **PII-free** dataset,
+generate a self-contained throwaway demo repo instead of using this repo's own fixture:
+
+```powershell
+# 1. Install the extension into local VS Code (compile + package + install)
+pwsh -File scripts\deploy-local.ps1
+
+# 2. Generate the throwaway demo repo (defaults to %TEMP%\searchlight-demo)
+pwsh -File scripts\demo-setup.ps1 -Force
+
+# 3. Open the generated demo folder in VS Code
+code "$env:TEMP\searchlight-demo"
+```
+
+The generated repo has a `main` base branch and a `feature/demo` compare branch with **2 commits**
+across **nested folders** (`src/api/`, `src/utils/`, `src/components/`, `tests/api/`) and a seeded
+**v2** review under `.vscode/searchlight-reviews/feature-demo_main/` — so all four panes populate:
+
+| Pane | What shows in the demo |
+|------|------------------------|
+| **Comparison**    | `Base: main` / `Compare: feature/demo` |
+| **Changed Files** | Folder tree: `src/api/{handlers,routes}.ts`, `src/utils/format.ts`, `src/components/Button.tsx`, `tests/api/handlers.test.ts` |
+| **Commits**       | The 2 `feature/demo` commits |
+| **Conversations** | 3 threads — the **`src/api/handlers.ts` `[bug]` thread** has a human comment + a threaded 🤖 Copilot agent reply |
+
+**To frame the screenshot:** in the demo window, open the Searchlight panel and compare
+`feature/demo → main`. Open **`src/api/handlers.ts`** so the inline **`[bug]` thread** (human
+comment + Copilot reply) is visible, with the four-view sidebar panel showing alongside. Then save
+the capture to **`docs/images/screenshot.png`** in *this* repo (the README references that path).
+
+All seeded content is synthetic — neutral author names (`reviewer`, agent `Copilot`) and generic
+widget-service code — so the screenshot contains **no PII or proprietary content**. The demo repo is
+external (under `%TEMP%`), so running the script never dirties this worktree.
+
+---
+
 ## Option A — Extension Development Host (F5)  ⭐ recommended
 
 1. Open this repo folder in VS Code:
@@ -152,10 +190,10 @@ hyperloop shell <vm> --script "code C:\path\to\workspace-with-searchlight-review
 
 # 3. capture a screenshot as demo evidence
 hyperloop window <vm> --action list --filter Code    # find the VS Code hwnd
-# screenshot the window and save under docs/demo/
+# screenshot the window and save under docs/images/
 ```
 
-Save the resulting screenshot to `docs/demo/` in this repo as the demo artifact.
+Save the resulting screenshot to `docs/images/screenshot.png` in this repo as the demo artifact.
 
 ---
 

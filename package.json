@@ -1,0 +1,438 @@
+{
+  "name": "searchlight",
+  "displayName": "Searchlight: Local Code Review",
+  "description": "Local-only code review with reviews, threads, and Copilot-ready comment schema.",
+  "version": "0.0.1",
+  "publisher": "TimothyMothra",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TimothyMothra/Searchlight-LocalCodeReview.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:.vscode/searchlight-reviews/**/comments.json"
+  ],
+  "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "searchlight",
+          "title": "Searchlight",
+          "icon": "media/searchlight.svg"
+        }
+      ]
+    },
+    "views": {
+      "searchlight": [
+        {
+          "id": "searchlight.comparison",
+          "name": "Comparison",
+          "type": "webview",
+          "icon": "media/searchlight.svg"
+        },
+        {
+          "id": "searchlight.files",
+          "name": "Changed Files",
+          "icon": "media/searchlight.svg"
+        },
+        {
+          "id": "searchlight.commits",
+          "name": "Commits",
+          "icon": "media/searchlight.svg"
+        },
+        {
+          "id": "searchlight.conversations",
+          "name": "Conversations",
+          "icon": "media/searchlight.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "searchlight.files",
+        "contents": "No changed files between base and compare."
+      },
+      {
+        "view": "searchlight.commits",
+        "contents": "No commits between base and compare."
+      },
+      {
+        "view": "searchlight.conversations",
+        "contents": "No conversations yet. Open a changed file and add a comment to start one."
+      }
+    ],
+    "commands": [
+      {
+        "command": "searchlight.refresh",
+        "title": "Searchlight: Refresh Local Reviews",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "searchlight.createOrReply",
+        "title": "Searchlight: Add Comment / Reply",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "searchlight.toggleThreadResolved",
+        "title": "Searchlight: Toggle Resolved",
+        "icon": "$(check)"
+      },
+      {
+        "command": "searchlight.resolveThread",
+        "title": "Searchlight: Resolve Thread",
+        "icon": "$(check)"
+      },
+      {
+        "command": "searchlight.unresolveThread",
+        "title": "Searchlight: Reopen Thread",
+        "icon": "$(issue-reopened)"
+      },
+      {
+        "command": "searchlight.resolveThreadNode",
+        "title": "Searchlight: Resolve Thread",
+        "icon": "$(check)"
+      },
+      {
+        "command": "searchlight.unresolveThreadNode",
+        "title": "Searchlight: Reopen Thread",
+        "icon": "$(issue-reopened)"
+      },
+      {
+        "command": "searchlight.askCopilotThread",
+        "title": "Searchlight: Ask Copilot to Review Thread",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "searchlight.askCopilotReview",
+        "title": "Searchlight: Ask Copilot to Review (All Threads)",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "searchlight.copyCommitId",
+        "title": "Searchlight: Copy Commit Id"
+      },
+      {
+        "command": "searchlight.copyBranchName",
+        "title": "Searchlight: Copy Branch Name"
+      },
+      {
+        "command": "searchlight.copyDirPath",
+        "title": "Searchlight: Copy Review Directory Path"
+      },
+      {
+        "command": "searchlight.pickBranches",
+        "title": "Searchlight: Pick Source/Target Branches",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "searchlight.switchReview",
+        "title": "Searchlight: Switch Active Review",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "searchlight.openDirectory",
+        "title": "Searchlight: Open Branch Directory",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "searchlight.gitPull",
+        "title": "Searchlight: Git Pull",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "searchlight.gitPush",
+        "title": "Searchlight: Git Push",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "searchlight.openTerminalHere",
+        "title": "Searchlight: Open Terminal Here",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "searchlight.pickBase",
+        "title": "Searchlight: Pick Base Branch",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "searchlight.pickCompare",
+        "title": "Searchlight: Pick Compare Branch",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "searchlight.swapBranches",
+        "title": "Searchlight: Swap Base/Compare",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "searchlight.refreshAll",
+        "title": "Searchlight: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "searchlight.openFileDiff",
+        "title": "Searchlight: Open File Diff"
+      },
+      {
+        "command": "searchlight.copyCommitSha",
+        "title": "Searchlight: Copy Commit SHA",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "searchlight.updateStaleBranch",
+        "title": "Searchlight: Update Stale Branch (Fast-Forward)",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "searchlight.filesExpandAll",
+        "title": "Searchlight: Expand All Files",
+        "icon": "$(expand-all)"
+      },
+      {
+        "command": "searchlight.openCommitDiff",
+        "title": "Searchlight: Open Commit Diff"
+      },
+      {
+        "command": "searchlight.commitsViewAllChanges",
+        "title": "Searchlight: View All Changes vs Base",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "searchlight.collapseAllCommits",
+        "title": "Searchlight: Collapse All Commits",
+        "icon": "$(collapse-all)"
+      },
+      {
+        "command": "searchlight.openCommitFileDiff",
+        "title": "Searchlight: Open Commit File Diff"
+      },
+      {
+        "command": "searchlight.openTerminal",
+        "title": "Searchlight: Open Terminal in Compare Branch Directory",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "searchlight.copyCompareBranch",
+        "title": "Searchlight: Copy Compare Branch Name",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "searchlight.copyComparePath",
+        "title": "Searchlight: Copy Compare Branch Path",
+        "icon": "$(files)"
+      }
+    ],
+    "configuration": {
+      "title": "Searchlight",
+      "properties": {
+        "searchlight.tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "idea",
+            "question",
+            "bug",
+            "change",
+            "todo",
+            "nit",
+            "praise"
+          ],
+          "description": "Tags offered by /tag autocomplete in the comment box and applied to a thread's tags[]."
+        },
+        "searchlight.copilotPath": {
+          "type": "string",
+          "default": "copilot",
+          "description": "Path to the Copilot CLI executable used by the 'Ask Copilot to Review' commands."
+        },
+        "searchlight.copilotArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-p"
+          ],
+          "description": "Arguments passed to the Copilot CLI before the generated prompt string (the prompt is appended as the final argument)."
+        },
+        "searchlight.defaultRemote": {
+          "type": "string",
+          "default": "",
+          "description": "Default remote name used by 'Git Push'. Leave empty to let git use the branch's configured upstream."
+        },
+        "searchlight.autoCreateOnEmpty": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, activation computes a default base/compare comparison and populates the panel. When false, base/compare stay unset until you pick them and the views show their welcome content."
+        },
+        "searchlight.perfLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, load-time timing lines are written to the Searchlight OUTPUT channel (prefixed [perf]) so you can see where time goes during activation and rendering."
+        },
+        "searchlight.deferThreadsOnLoad": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, comment threads are not materialized eagerly during activation; rendering is deferred until an editor becomes visible (or a short fallback delay), avoiding thread flashing and editor-tab churn on load. User actions (reply, resolve) always render immediately."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "searchlight.copyCompareBranch",
+          "when": "view == searchlight.comparison",
+          "group": "navigation@1"
+        },
+        {
+          "command": "searchlight.copyComparePath",
+          "when": "view == searchlight.comparison",
+          "group": "navigation@2"
+        },
+        {
+          "command": "searchlight.openTerminal",
+          "when": "view == searchlight.comparison",
+          "group": "navigation@3"
+        },
+        {
+          "command": "searchlight.refreshAll",
+          "when": "view == searchlight.comparison",
+          "group": "navigation@4"
+        },
+        {
+          "command": "searchlight.commitsViewAllChanges",
+          "when": "view == searchlight.files",
+          "group": "navigation@0"
+        },
+        {
+          "command": "searchlight.filesExpandAll",
+          "when": "view == searchlight.files",
+          "group": "navigation@1"
+        },
+        {
+          "command": "searchlight.refreshAll",
+          "when": "view == searchlight.files",
+          "group": "navigation@2"
+        },
+        {
+          "command": "searchlight.refreshAll",
+          "when": "view == searchlight.commits",
+          "group": "navigation@3"
+        },
+        {
+          "command": "searchlight.collapseAllCommits",
+          "when": "view == searchlight.commits",
+          "group": "navigation@2"
+        },
+        {
+          "command": "searchlight.refreshAll",
+          "when": "view == searchlight.conversations",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "searchlight.copyCommitSha",
+          "when": "view == searchlight.commits && viewItem == searchlight.commit",
+          "group": "inline@1"
+        },
+        {
+          "command": "searchlight.copyCommitSha",
+          "when": "view == searchlight.commits && viewItem == searchlight.commit",
+          "group": "searchlight@1"
+        },
+        {
+          "command": "searchlight.resolveThreadNode",
+          "when": "view == searchlight.conversations && viewItem == searchlight.thread.unresolved",
+          "group": "inline@1"
+        },
+        {
+          "command": "searchlight.unresolveThreadNode",
+          "when": "view == searchlight.conversations && viewItem == searchlight.thread.resolved",
+          "group": "inline@1"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "searchlight.toggleThreadResolved",
+          "group": "inline@1",
+          "when": "commentController == searchlight"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "searchlight.createOrReply",
+          "group": "inline@1",
+          "when": "commentController == searchlight"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "searchlight.createOrReply",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.resolveThread",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.unresolveThread",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.resolveThreadNode",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.unresolveThreadNode",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.askCopilotThread",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.openFileDiff",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.openCommitDiff",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.openCommitFileDiff",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.copyCommitSha",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.4.0"
+  }
+}

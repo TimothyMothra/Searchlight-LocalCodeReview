@@ -1,0 +1,54 @@
+{
+  "version": 2,
+  "sourceBranch": "feature",
+  "targetBranch": "main",
+  "sourceCommit": "0000000000000000000000000000000000000000",
+  "targetCommit": "1111111111111111111111111111111111111111",
+  "threads": [
+    {
+      "id": "t-1",
+      "filePath": "SCOPING.md",
+      "startLine": 17,
+      "endLine": 18,
+      "state": "unresolved",
+      "tags": ["question", "change"],
+      "comments": [
+        {
+          "id": "c-1",
+          "body": "Should the storage path be configurable, or is `.vscode/searchlight-reviews/` always fixed?",
+          "timestamp": "2026-07-03T08:00:00.000Z",
+          "author": { "kind": "human", "name": "reviewer" }
+        },
+        {
+          "id": "c-2",
+          "body": "Fixed for v0. We can add a `searchlight.storagePath` setting in v1 if needed.\n\n~Written by 🤖 Copilot",
+          "timestamp": "2026-07-03T08:05:00.000Z",
+          "replyTo": "c-1",
+          "author": {
+            "kind": "agent",
+            "name": "Copilot",
+            "model": "Claude Opus 4.8",
+            "reasoning": "high",
+            "version": "1.0.69"
+          }
+        }
+      ]
+    },
+    {
+      "id": "t-2",
+      "filePath": "README.md",
+      "startLine": 1,
+      "endLine": 1,
+      "state": "resolved",
+      "tags": ["nit", "praise"],
+      "comments": [
+        {
+          "id": "c-3",
+          "body": "Nice, the README title reads clearly.",
+          "timestamp": "2026-07-03T08:10:00.000Z",
+          "author": { "kind": "human", "name": "reviewer" }
+        }
+      ]
+    }
+  ]
+}

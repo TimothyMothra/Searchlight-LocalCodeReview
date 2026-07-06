@@ -52,6 +52,16 @@ export function perfCount(label: string, startMs: number, count: number, extra?:
 	emit(`${label}: ${ms}ms, count=${count}${extra ? `, ${extra}` : ''}`);
 }
 
+/**
+ * Log `[perf] <label>: <ms>ms, count=<n>` for an ALREADY-MEASURED duration. Unlike `perfCount` (which
+ * computes `Date.now() - startMs`), this takes a precomputed `ms` — used for durations measured on the
+ * other side of the webview boundary (e.g. a pane's client-side `performance.now()` render delta, which
+ * the extension host can't time itself). `ms` is rounded since `performance.now()` is fractional.
+ */
+export function perfCountMs(label: string, ms: number, count: number, extra?: string): void {
+	emit(`${label}: ${Math.round(ms)}ms, count=${count}${extra ? `, ${extra}` : ''}`);
+}
+
 /** Log a bare `[perf] <text>` line (used for the `--- activation ---` header). */
 export function perfLine(text: string): void {
 	emit(text);

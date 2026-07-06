@@ -12,6 +12,7 @@
 import * as vscode from 'vscode';
 import { authorDisplay, formatTimestamp, ReviewComment, ReviewThread } from './reviewModel';
 import { ActiveComparison } from './activeComparison';
+import { perfCount } from './perf';
 
 type NodeKind = 'thread' | 'comment';
 
@@ -49,7 +50,11 @@ export class ConversationsViewProvider implements vscode.TreeDataProvider<Conver
 		}
 
 		if (!element) {
-			return review.threads.map((t, i) => this.makeThreadNode(t, i));
+			// Root build — pure in-memory thread map (no git op), so ms is expected to be ~0.
+			const tBuild = Date.now();
+			const nodes = review.threads.map((t, i) => this.makeThreadNode(t, i));
+			perfCount('conversations.build', tBuild, nodes.length);
+			return nodes;
 		}
 
 		if (element.kind === 'thread' && element.thread) {

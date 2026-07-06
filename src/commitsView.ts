@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { ActiveComparison } from './activeComparison';
 import { CommitEntry, changedFilesForCommit } from './git';
+import { perfCount } from './perf';
 
 export class CommitNode extends vscode.TreeItem {
 	constructor(label: string, public readonly sha: string) {
@@ -54,7 +55,9 @@ export class CommitsViewProvider implements vscode.TreeDataProvider<CommitTreeNo
 			if (!cwd) {
 				return [];
 			}
+			const tExpand = Date.now();
 			const files = await changedFilesForCommit(cwd, element.sha);
+			perfCount('commits.expand', tExpand, files.length);
 			return files.map((rel) => this.makeFileNode(element.sha, rel));
 		}
 
@@ -64,6 +67,7 @@ export class CommitsViewProvider implements vscode.TreeDataProvider<CommitTreeNo
 		}
 
 		// Root → the flat commit list (bounded; a trailing info node marks truncation).
+		const tBuild = Date.now();
 		const { commits, truncated } = await active.getCommits();
 		const nodes: CommitTreeNode[] = commits.map((c) => this.makeNode(c));
 		if (truncated) {
@@ -75,6 +79,7 @@ export class CommitsViewProvider implements vscode.TreeDataProvider<CommitTreeNo
 			more.tooltip = 'The commit log was truncated for performance. Use the terminal for the full history.';
 			nodes.push(more);
 		}
+		perfCount('commits.build', tBuild, nodes.length);
 		return nodes;
 	}
 

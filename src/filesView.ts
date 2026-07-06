@@ -8,6 +8,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ActiveComparison } from './activeComparison';
+import { perfCount } from './perf';
 
 /** A node in the changed-files tree: either an interior folder or a file leaf. */
 export class FileNode extends vscode.TreeItem {
@@ -91,13 +92,19 @@ export class FilesViewProvider implements vscode.TreeDataProvider<FileNode> {
 			}
 		}
 
+		const tBuild = !element ? Date.now() : 0;
 		const tree = this.buildTree(this.paths);
 		const prefix = element && element.kind === 'folder' ? element.relPath : '';
 		const subtree = prefix ? this.descend(tree, prefix) : tree;
 		if (!subtree) {
 			return [];
 		}
-		return this.renderLevel(subtree, prefix, active);
+		const rows = this.renderLevel(subtree, prefix, active);
+		if (!element) {
+			// Root build (files loaded) — capture the "before" cardinality for the webview conversion.
+			perfCount('files.build', tBuild, rows.length, `paths=${this.paths.length}`);
+		}
+		return rows;
 	}
 
 	// ── Tree construction ───────────────────────────────────────────────────────

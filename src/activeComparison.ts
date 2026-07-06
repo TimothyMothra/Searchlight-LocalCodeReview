@@ -12,7 +12,7 @@ import { getHead } from './gitApi';
 import { changedFiles, CommitEntry, defaultBaseBranch, logRange, resolveCommit } from './git';
 import { computeReviewPaths, emptyReview, loadReview } from './reviewStore';
 import { Review } from './reviewModel';
-import { perf } from './perf';
+import { perfCount } from './perf';
 
 /** Holds and resolves the active base/compare comparison + its review. */
 export class ActiveComparison {
@@ -204,7 +204,7 @@ export class ActiveComparison {
 		const t = Date.now();
 		this.changedFilesValue = await changedFiles(this.repoRootFsPath, this.base, this.compare);
 		this.changedFilesKey = key;
-		perf('changedFiles (git diff)', t, `${this.changedFilesValue.length} files`);
+		perfCount('files.data-load', t, this.changedFilesValue.length);
 		return this.changedFilesValue;
 	}
 
@@ -222,7 +222,7 @@ export class ActiveComparison {
 		this.commitsValue = result.commits;
 		this.commitsTruncated = result.truncated;
 		this.commitsKey = key;
-		perf('logRange (git log)', t, `${this.commitsValue.length} commits, truncated=${this.commitsTruncated}`);
+		perfCount('commits.data-load', t, this.commitsValue.length, `truncated=${this.commitsTruncated}`);
 		return { commits: this.commitsValue, truncated: this.commitsTruncated };
 	}
 }

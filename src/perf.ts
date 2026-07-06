@@ -41,6 +41,17 @@ export function perf(label: string, startMs: number, suffix?: string): void {
 	emit(`${label}: ${ms}ms${suffix ? `, ${suffix}` : ''}`);
 }
 
+/**
+ * Log `[perf] <label>: <ms>ms, count=<n>` for a build/data-load that produced `count` items. When
+ * `extra` is provided it is appended after the count (e.g. `paths=137` or `truncated=false`, and it
+ * may carry a `bytes=` field). Mirrors `perf` but adds item cardinality so the webview-conversion
+ * project has real "before" numbers to detect regressions against.
+ */
+export function perfCount(label: string, startMs: number, count: number, extra?: string): void {
+	const ms = Date.now() - startMs;
+	emit(`${label}: ${ms}ms, count=${count}${extra ? `, ${extra}` : ''}`);
+}
+
 /** Log a bare `[perf] <text>` line (used for the `--- activation ---` header). */
 export function perfLine(text: string): void {
 	emit(text);

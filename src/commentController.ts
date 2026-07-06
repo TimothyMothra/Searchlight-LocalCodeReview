@@ -388,18 +388,18 @@ export class SearchlightCommentController implements vscode.Disposable {
 			bits.push(thread.tags.map((t) => `#${t}`).join(' '));
 		}
 		bits.push(thread.state === 'resolved' ? '✓ resolved' : 'unresolved');
-		// VS Code hardcodes the reply box to "Reply..." and ignores CommentController.options.placeHolder
-		// there (microsoft/vscode#110348). The thread label is the only surface that can hint the reply
-		// box, so append a compact reminder of the `/tag` autocomplete. Only appended — existing
-		// file:line / status content is preserved.
-		return bits.join('  ·  ') + ' · type / for tags';
+		return bits.join('  ·  ');
 	}
 
 	private toComment(model: ReviewComment): vscode.Comment {
 		const a = model.author;
 		const disp = authorDisplay(a);
 		const detailBits = [a?.model, a?.version].filter(Boolean);
-		const authorName = detailBits.length > 0 ? `${disp.name} (${detailBits.join(' · ')})` : disp.name;
+		let authorName = detailBits.length > 0 ? `${disp.name} (${detailBits.join(' · ')})` : disp.name;
+		// Render per-comment tags as a compact `#tag` badge right on the comment the user tagged.
+		if (model.tags && model.tags.length > 0) {
+			authorName += '  ' + model.tags.map((t) => `#${t}`).join(' ');
+		}
 		return {
 			body: new vscode.MarkdownString(model.body),
 			mode: vscode.CommentMode.Preview,
@@ -450,7 +450,7 @@ export class SearchlightCommentController implements vscode.Disposable {
 			if (!review) {
 				return;
 			}
-			store.addReply(review, binding.threadId, undefined, body, author);
+			store.addReply(review, binding.threadId, undefined, body, author, tags);
 			if (tags.length > 0) {
 				store.addThreadTags(review, binding.threadId, tags);
 			}

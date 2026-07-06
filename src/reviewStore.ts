@@ -90,6 +90,10 @@ function serializeComment(comment: ReviewComment): Record<string, unknown> {
 	if (author) {
 		out.author = author;
 	}
+	// Additive: only write per-comment tags when present, to keep files diff-friendly and back-compat.
+	if (comment.tags && comment.tags.length > 0) {
+		out.tags = comment.tags;
+	}
 	return out;
 }
 
@@ -187,6 +191,7 @@ export function addComment(
 	threadId: string,
 	body: string,
 	author: ReviewAuthor,
+	tags: string[] = [],
 ): ReviewComment | undefined {
 	const thread = review.threads.find((t) => t.id === threadId);
 	if (!thread) {
@@ -197,6 +202,7 @@ export function addComment(
 		body,
 		timestamp: new Date().toISOString(),
 		author,
+		...(tags.length > 0 ? { tags: [...tags] } : {}),
 	};
 	thread.comments.push(comment);
 	return comment;
@@ -209,6 +215,7 @@ export function addReply(
 	replyToId: string | undefined,
 	body: string,
 	author: ReviewAuthor,
+	tags: string[] = [],
 ): ReviewComment | undefined {
 	const thread = review.threads.find((t) => t.id === threadId);
 	if (!thread) {
@@ -222,6 +229,7 @@ export function addReply(
 		timestamp: new Date().toISOString(),
 		replyTo: parent,
 		author,
+		...(tags.length > 0 ? { tags: [...tags] } : {}),
 	};
 	thread.comments.push(comment);
 	return comment;
@@ -282,6 +290,7 @@ export function addThread(
 				body,
 				timestamp: new Date().toISOString(),
 				author,
+				...(tags.length > 0 ? { tags: [...tags] } : {}),
 			},
 		],
 	};

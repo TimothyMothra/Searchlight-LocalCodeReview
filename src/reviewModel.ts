@@ -30,6 +30,8 @@ export interface ReviewComment {
 	/** v2 threading: the comment id this one replies to. */
 	replyTo?: string;
 	author?: ReviewAuthor;
+	/** v2, additive: tags applied to THIS comment (e.g. from `/nit`). Absent on older files. */
+	tags?: string[];
 }
 
 export interface ReviewThread {
@@ -149,6 +151,8 @@ function parseComment(raw: unknown): ReviewComment {
 		timestamp: typeof o.timestamp === 'string' ? o.timestamp : undefined,
 		replyTo: typeof o.replyTo === 'string' ? o.replyTo : undefined,
 		author: parseAuthor(o.author),
+		// Additive/back-compat: tolerate absence (older files have no per-comment tags).
+		tags: Array.isArray(o.tags) ? o.tags.filter((t): t is string => typeof t === 'string') : undefined,
 	};
 }
 

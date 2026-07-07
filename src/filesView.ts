@@ -74,8 +74,8 @@ export class FilesViewProvider implements vscode.TreeDataProvider<FileNode> {
 			if (this.loadedKey !== key) {
 				if (this.loadingKey !== key) {
 					this.loadingKey = key;
-					void active.getChangedFiles().then((paths) => {
-						this.paths = paths;
+					void active.getChangedFiles().then((files) => {
+						this.paths = files.map((f) => f.relPath);
 						this.loadedKey = key;
 						this.loadingKey = undefined;
 						this._onDidChangeTreeData.fire();

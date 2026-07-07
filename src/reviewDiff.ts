@@ -115,7 +115,7 @@ export async function openAllChangesDiff(active: ActiveComparison): Promise<void
 		return;
 	}
 	const rightIsHead = compareIsHead(active);
-	const resources = files.map((rel) => {
+	const resources = files.map(({ relPath: rel }) => {
 		const resourceUri = vscode.Uri.file(path.join(cwd, rel));
 		const leftUri = diffUri(rel, base, cwd);
 		const rightUri = rightIsHead ? vscode.Uri.file(path.join(cwd, rel)) : diffUri(rel, compare, cwd);

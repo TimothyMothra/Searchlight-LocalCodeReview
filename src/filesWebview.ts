@@ -9,9 +9,11 @@
  *   - expand-all via `setExpanded(true)` (host command `searchlight.filesExpandAll`).
  *
  * Icon gap: TreeItems get native file icons + git-status decoration colors for free; a webview
- * cannot. `getChangedFiles()` returns paths only (no per-file M/A/D/R status), so rows render a
- * generic inline-SVG file/folder glyph (no status letter — there is no status data to derive one
- * from, and adding a `--name-status` git op would risk the very perf regression this project tracks).
+ * cannot. To close that gap, `getChangedFiles()` returns per-file `{ relPath, status }` (the status
+ * column comes free from upgrading the existing `git diff --name-only` to `--name-status` — same
+ * single git op, no extra data-load, so `files.data-load` stays the apples-to-apples baseline).
+ * Each file row renders a generic inline-SVG file glyph plus a status letter (M/A/D/R/C/U) and is
+ * tinted with the matching `--vscode-gitDecoration-*ResourceForeground` theme color.
  *
  * This module NEVER calls a language model.
  */
@@ -22,6 +24,7 @@ import { ReviewStatusBar } from './statusBar';
 import * as store from './reviewStore';
 import { webviewHtml, getNonce } from './webviewShell';
 import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
+import { ChangedFile } from './git';
 
 /** A folder node in the serializable tree sent to the webview. */
 interface WireDir {
@@ -36,6 +39,7 @@ interface WireFile {
 	name: string;
 	relPath: string;
 	reviewed: boolean;
+	status: string;
 }
 
 type IncomingMessage =
@@ -49,7 +53,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	private filesExpanded = false;
 
 	// Mirror of filesView.ts loading state so we show "Loading changes…" once per comparison key.
-	private paths: string[] = [];
+	private paths: ChangedFile[] = [];
 	private loadedKey?: string;
 	private loadingKey?: string;
 
@@ -140,8 +144,8 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 				this.loadingKey = key;
 				active
 					.getChangedFiles()
-					.then((paths) => {
-						this.paths = paths;
+					.then((files) => {
+						this.paths = files;
 						this.loadedKey = key;
 						this.loadingKey = undefined;
 						void this.postState();
@@ -167,12 +171,12 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	 * Split paths into a nested folder tree (folders-first, then alphabetical at each level) —
 	 * the same shape filesView.ts's buildTree/renderLevel produced, but serializable.
 	 */
-	private buildTree(paths: string[], reviewedFiles: string[]): WireDir {
+	private buildTree(paths: ChangedFile[], reviewedFiles: string[]): WireDir {
 		const reviewed = new Set(reviewedFiles);
 		const root: WireDir = { name: '', relPath: '', dirs: [], files: [] };
 
 		for (const p of paths) {
-			const segments = p.split('/');
+			const segments = p.relPath.split('/');
 			let node = root;
 			// Interior segments → nested dirs.
 			for (let i = 0; i < segments.length - 1; i++) {
@@ -187,7 +191,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 			}
 			// Last segment → file leaf.
 			const name = segments[segments.length - 1];
-			node.files.push({ name, relPath: p, reviewed: reviewed.has(p) });
+			node.files.push({ name, relPath: p.relPath, reviewed: reviewed.has(p.relPath), status: p.status });
 		}
 
 		this.sortLevel(root);
@@ -251,6 +255,24 @@ const FILES_CSS = `
 .glyph svg { width: 16px; height: 16px; fill: currentColor; }
 .label { overflow: hidden; text-overflow: ellipsis; }
 .desc { color: var(--vscode-descriptionForeground); margin-left: 6px; font-size: 0.9em; }
+/* Git-status letter badge (M/A/D/R/C/U/T), colored to match the row's decoration color. */
+.status {
+	margin-left: auto;
+	padding-left: 8px;
+	min-width: 12px;
+	text-align: center;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.85em;
+	opacity: 0.9;
+}
+/* Per-status decoration colors (mirror VS Code's native SCM/file-explorer coloring). */
+.file.st-M .label, .file.st-M .status { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+.file.st-A .label, .file.st-A .status { color: var(--vscode-gitDecoration-addedResourceForeground); }
+.file.st-D .label, .file.st-D .status { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+.file.st-R .label, .file.st-R .status { color: var(--vscode-gitDecoration-renamedResourceForeground); }
+.file.st-C .label, .file.st-C .status { color: var(--vscode-gitDecoration-renamedResourceForeground); }
+.file.st-U .label, .file.st-U .status { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
+.file.st-T .label, .file.st-T .status { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
 .children { display: block; }
 .dir.collapsed > .children { display: none; }
 input.chk { margin: 0 2px 0 0; }
@@ -296,7 +318,7 @@ function renderDir(dir) {
 	}
 	for (const f of dir.files) {
 		const row = document.createElement('div');
-		row.className = 'row file';
+		row.className = 'row file' + (f.status ? ' st-' + f.status : '');
 		const chk = document.createElement('input');
 		chk.type = 'checkbox';
 		chk.className = 'chk';
@@ -318,6 +340,13 @@ function renderDir(dir) {
 		row.appendChild(chk);
 		row.appendChild(glyph);
 		row.appendChild(label);
+		if (f.status) {
+			const st = document.createElement('span');
+			st.className = 'status';
+			st.textContent = f.status;
+			st.title = 'Git status: ' + f.status;
+			row.appendChild(st);
+		}
 		row.addEventListener('click', () => {
 			vscode.postMessage({ type: 'openFile', relPath: f.relPath });
 		});

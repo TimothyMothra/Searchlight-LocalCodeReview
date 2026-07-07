@@ -9,7 +9,7 @@
 
 import * as vscode from 'vscode';
 import { getHead } from './gitApi';
-import { changedFiles, CommitEntry, defaultBaseBranch, logRange, resolveCommit } from './git';
+import { changedFiles, ChangedFile, CommitEntry, defaultBaseBranch, logRange, resolveCommit } from './git';
 import { computeReviewPaths, emptyReview, loadReview } from './reviewStore';
 import { Review } from './reviewModel';
 import { perfCount } from './perf';
@@ -39,7 +39,7 @@ export class ActiveComparison {
 
 	/** Memoized changedFiles/logRange results, keyed by the resolved commit pair. */
 	private changedFilesKey?: string;
-	private changedFilesValue: string[] = [];
+	private changedFilesValue: ChangedFile[] = [];
 	private commitsKey?: string;
 	private commitsValue: CommitEntry[] = [];
 	private commitsTruncated = false;
@@ -193,7 +193,7 @@ export class ActiveComparison {
 	 * comment save does not change the shas, so it hits the cache (the diff is genuinely unchanged);
 	 * picking a different base/compare re-resolves → new shas → cache refetch.
 	 */
-	async getChangedFiles(): Promise<string[]> {
+	async getChangedFiles(): Promise<ChangedFile[]> {
 		if (!this.base || !this.compare) {
 			return [];
 		}

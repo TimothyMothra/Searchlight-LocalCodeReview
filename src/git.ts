@@ -181,20 +181,49 @@ export interface CommitEntry {
 	relDate: string;
 }
 
+/** A changed file plus its single-letter git status (M/A/D/R/C/U/T). */
+export interface ChangedFile {
+	/** Repo-relative, forward-slash path (the NEW path for renames/copies). */
+	relPath: string;
+	/** Single-letter status: M(odified) A(dded) D(eleted) R(enamed) C(opied) U(nmerged) T(ype-change). */
+	status: string;
+}
+
 /**
  * Files changed between `base` and `compare` using the symmetric-difference (three-dot) range
- * `git diff --name-only base...compare` — i.e. changes on `compare` since it diverged from `base`.
- * Returns repo-relative, forward-slash paths, or `[]` on any failure.
+ * `git diff --name-status base...compare` — i.e. changes on `compare` since it diverged from `base`.
+ * `--name-status` is a single pass returning the same file list as `--name-only` plus a leading
+ * status column (no extra git op). Returns `{ relPath, status }` per file, or `[]` on any failure.
+ *
+ * Line formats: `M\tpath`, `A\tpath`, `D\tpath`, `T\tpath` (one path); `R100\told\tnew`,
+ * `C075\told\tnew` (two paths — the NEW path is used). The similarity score on R/C is stripped so
+ * status collapses to a single letter.
  */
-export async function changedFiles(cwd: string, base: string, compare: string): Promise<string[]> {
-	const out = await gitv(['diff', '--name-only', `${base}...${compare}`], cwd);
+export async function changedFiles(cwd: string, base: string, compare: string): Promise<ChangedFile[]> {
+	const out = await gitv(['diff', '--name-status', `${base}...${compare}`], cwd);
 	if (!out) {
 		return [];
 	}
-	return out
-		.split(/\r?\n/)
-		.map((l) => l.trim())
-		.filter((l) => l.length > 0);
+	const results: ChangedFile[] = [];
+	for (const raw of out.split(/\r?\n/)) {
+		const line = raw.trim();
+		if (line.length === 0) {
+			continue;
+		}
+		const fields = line.split('\t');
+		if (fields.length < 2) {
+			continue;
+		}
+		// First char of the status field; for `R100`/`C075` this is `R`/`C` (score dropped).
+		const status = fields[0].charAt(0).toUpperCase();
+		// Renames/copies carry old+new paths; the NEW (last) field is the current path.
+		const relPath = fields[fields.length - 1].trim();
+		if (relPath.length === 0) {
+			continue;
+		}
+		results.push({ relPath, status });
+	}
+	return results;
 }
 
 /**

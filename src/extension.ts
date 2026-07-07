@@ -29,7 +29,7 @@ import {
 import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
 import { FilesWebviewProvider } from './filesWebview';
-import { CommitsViewProvider } from './commitsView';
+import { CommitsWebviewProvider } from './commitsWebview';
 import { ConversationsViewProvider, ConversationNode } from './conversationsView';
 import {
 	DIFF_SCHEME,
@@ -105,7 +105,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			);
 		},
 	);
-	const commitsProvider = new CommitsViewProvider(() => active);
+	const commitsProvider = new CommitsWebviewProvider(() => active);
 	const conversationsProvider = new ConversationsViewProvider(() => active);
 	const filesProvider = new FilesWebviewProvider(
 		() => active,
@@ -121,9 +121,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	);
+	// The Commits pane is now a webview (Phase D). Its expand/collapse, lazy
+	// file listing, copy-sha button, and truncation node are handled inside
+	// CommitsWebviewProvider's message handling — no TreeView subscription.
 	context.subscriptions.push(
-		vscode.window.createTreeView('searchlight.commits', {
-			treeDataProvider: commitsProvider,
+		vscode.window.registerWebviewViewProvider('searchlight.commits', commitsProvider, {
+			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	);
 	context.subscriptions.push(
@@ -349,13 +352,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('searchlight.filesExpandAll', () => {
 			filesProvider.setExpanded(true);
 		}),
-		vscode.commands.registerCommand('searchlight.collapseAllCommits', async () => {
-			// The commits tree is a standard lazy TreeDataProvider, so collapsing is
-			// pure UI state — expanding a commit re-invokes getChildren() to lazily
-			// re-list its files. Use the tree view's built-in collapseAll command.
-			await vscode.commands.executeCommand(
-				'workbench.actions.treeView.searchlight.commits.collapseAll',
-			);
+		vscode.commands.registerCommand('searchlight.collapseAllCommits', () => {
+			// The Commits pane is a webview (Phase D); collapsing is pure UI state
+			// posted to the webview, which collapses all expanded commit rows.
+			commitsProvider.setExpanded(false);
 		}),
 		vscode.commands.registerCommand(
 			'searchlight.updateStaleBranch',

@@ -28,7 +28,7 @@ import {
 } from './git';
 import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
-import { FilesViewProvider, FileNode } from './filesView';
+import { FilesWebviewProvider } from './filesWebview';
 import { CommitsViewProvider } from './commitsView';
 import { ConversationsViewProvider, ConversationNode } from './conversationsView';
 import {
@@ -105,18 +105,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			);
 		},
 	);
-	const filesProvider = new FilesViewProvider(() => active);
 	const commitsProvider = new CommitsViewProvider(() => active);
 	const conversationsProvider = new ConversationsViewProvider(() => active);
+	const filesProvider = new FilesWebviewProvider(
+		() => active,
+		statusBar,
+		() => conversationsProvider.refresh(),
+	);
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('searchlight.comparison', comparisonProvider),
 	);
-	const filesTreeView = vscode.window.createTreeView('searchlight.files', {
-		treeDataProvider: filesProvider,
-		showCollapseAll: true,
-	});
-	context.subscriptions.push(filesTreeView);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider('searchlight.files', filesProvider, {
+			webviewOptions: { retainContextWhenHidden: true },
+		}),
+	);
 	context.subscriptions.push(
 		vscode.window.createTreeView('searchlight.commits', {
 			treeDataProvider: commitsProvider,
@@ -147,32 +151,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		),
 	);
 
-	// File checkbox toggles → reviewedFiles mutation (persists on first change).
-	context.subscriptions.push(
-		filesTreeView.onDidChangeCheckboxState(async (e) => {
-			const review = active.review;
-			if (!review) {
-				return;
-			}
-			review.reviewedFiles ??= [];
-			for (const [item, state] of e.items) {
-				if (item.kind !== 'file' || !item.relPath) {
-					continue;
-				}
-				const checked = state === vscode.TreeItemCheckboxState.Checked;
-				const idx = review.reviewedFiles.indexOf(item.relPath);
-				if (checked && idx === -1) {
-					review.reviewedFiles.push(item.relPath);
-				} else if (!checked && idx !== -1) {
-					review.reviewedFiles.splice(idx, 1);
-				}
-			}
-			await store.saveReview(review);
-			filesProvider.refresh();
-			conversationsProvider.refresh();
-			void statusBar.update();
-		}),
-	);
+	// File checkbox toggles are handled inside FilesWebviewProvider.onToggleReviewed
+	// (the Files pane is now a webview; the reviewedFiles mutation + persist lives there).
 
 	// Initial inline render.
 	void comments.render();

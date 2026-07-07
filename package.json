@@ -46,6 +46,7 @@
         {
           "id": "searchlight.files",
           "name": "Changed Files",
+          "type": "webview",
           "icon": "media/searchlight.svg"
         },
         {

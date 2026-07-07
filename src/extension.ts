@@ -30,7 +30,6 @@ import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
 import { FilesWebviewProvider } from './filesWebview';
 import { CommitsWebviewProvider } from './commitsWebview';
-import { ConversationNode } from './conversationsView';
 import { ConversationsWebviewProvider } from './conversationsWebview';
 import {
 	DIFF_SCHEME,
@@ -220,7 +219,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		),
 		vscode.commands.registerCommand(
 			'searchlight.resolveThreadNode',
-			async (node: ConversationNode) => {
+			// The Conversations webview posts a { thread: { id } } stub; the former ConversationNode
+			// (native TreeItem, deleted in Phase F) satisfied this same minimal shape.
+			async (node: { thread?: { id?: string } }) => {
 				const reviewFile = active.review?.sourceFile;
 				const threadId = node?.thread?.id;
 				if (!reviewFile || !threadId) {
@@ -233,7 +234,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		),
 		vscode.commands.registerCommand(
 			'searchlight.unresolveThreadNode',
-			async (node: ConversationNode) => {
+			async (node: { thread?: { id?: string } }) => {
 				const reviewFile = active.review?.sourceFile;
 				const threadId = node?.thread?.id;
 				if (!reviewFile || !threadId) {

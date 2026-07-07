@@ -30,7 +30,8 @@ import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
 import { FilesWebviewProvider } from './filesWebview';
 import { CommitsWebviewProvider } from './commitsWebview';
-import { ConversationsViewProvider, ConversationNode } from './conversationsView';
+import { ConversationNode } from './conversationsView';
+import { ConversationsWebviewProvider } from './conversationsWebview';
 import {
 	DIFF_SCHEME,
 	ReviewDiffContentProvider,
@@ -106,7 +107,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		},
 	);
 	const commitsProvider = new CommitsWebviewProvider(() => active);
-	const conversationsProvider = new ConversationsViewProvider(() => active);
+	const conversationsProvider = new ConversationsWebviewProvider(() => active);
 	const filesProvider = new FilesWebviewProvider(
 		() => active,
 		statusBar,
@@ -129,10 +130,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	);
+	// The Conversations pane is now a webview (Phase E). Its thread rows,
+	// per-comment #tag badges, resolve/unresolve inline buttons, and
+	// click-to-navigate are handled inside ConversationsWebviewProvider's
+	// message handling — no TreeView subscription. refresh() re-posts state so
+	// the Files->Conversations refresh hook and refreshAll keep working.
 	context.subscriptions.push(
-		vscode.window.createTreeView('searchlight.conversations', {
-			treeDataProvider: conversationsProvider,
-			showCollapseAll: true,
+		vscode.window.registerWebviewViewProvider('searchlight.conversations', conversationsProvider, {
+			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	);
 

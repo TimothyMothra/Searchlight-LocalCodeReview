@@ -58,6 +58,7 @@
         {
           "id": "searchlight.conversations",
           "name": "Conversations",
+          "type": "webview",
           "icon": "media/searchlight.svg"
         }
       ]

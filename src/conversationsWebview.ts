@@ -23,7 +23,7 @@
 
 import * as vscode from 'vscode';
 import { ActiveComparison } from './activeComparison';
-import { authorDisplay, formatTimestamp, ReviewComment, ReviewThread } from './reviewModel';
+import { authorDisplay, formatTimestamp, relocateAnchor, ReviewComment, ReviewThread } from './reviewModel';
 import { webviewHtml, getNonce } from './webviewShell';
 import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
 
@@ -47,6 +47,7 @@ interface WireThread {
 	filePath?: string;
 	navStart: number; // startLine ?? 1
 	navEnd: number; // endLine ?? startLine ?? 1
+	drift?: 'relocated' | 'orphaned'; // uncommitted anchor moved (relocated) or vanished (orphaned)
 	comments: WireComment[];
 }
 
@@ -127,14 +128,48 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 
 		// Root build — pure in-memory thread map (no git op), so ms is expected to be ~0.
 		const tBuild = Date.now();
-		const wire: WireThread[] = review.threads.map((t, i) => this.toWireThread(t, i));
+		// Per-postState cache so multiple threads in the same file read it once.
+		const lineCache = new Map<string, string[] | null>();
+		const wire: WireThread[] = [];
+		for (let i = 0; i < review.threads.length; i++) {
+			wire.push(await this.toWireThread(review.threads[i], i, lineCache));
+		}
 		logBuild('conversations', tBuild, wire.length, wire);
 		this.view.webview.postMessage({ type: 'state', threads: wire });
 	}
 
-	private toWireThread(thread: ReviewThread, index: number): WireThread {
+	/**
+	 * Read the current lines of a repo-relative file (open doc or from disk), cached per postState.
+	 * Never throws — returns null when the file can't be resolved/read (→ treated as orphaned).
+	 */
+	private async readFileLines(
+		filePath: string,
+		cache: Map<string, string[] | null>,
+	): Promise<string[] | null> {
+		if (cache.has(filePath)) {
+			return cache.get(filePath)!;
+		}
+		let lines: string[] | null = null;
+		try {
+			const folders = vscode.workspace.workspaceFolders ?? [];
+			if (folders.length > 0) {
+				const uri = vscode.Uri.joinPath(folders[0].uri, ...filePath.split('/'));
+				const doc = await vscode.workspace.openTextDocument(uri);
+				lines = doc.getText().split(/\r?\n/);
+			}
+		} catch {
+			lines = null;
+		}
+		cache.set(filePath, lines);
+		return lines;
+	}
+
+	private async toWireThread(
+		thread: ReviewThread,
+		index: number,
+		lineCache: Map<string, string[] | null>,
+	): Promise<WireThread> {
 		const num = String(thread.seq ?? index + 1).padStart(2, '0');
-		const loc = thread.filePath ? `${thread.filePath}:${thread.startLine ?? '?'}` : '(no file)';
 		const resolved = thread.state === 'resolved';
 
 		const bits: string[] = [];
@@ -145,6 +180,32 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 			bits.push(thread.tags.map((t) => `#${t}`).join(' '));
 		}
 
+		let navStart = thread.startLine ?? 1;
+		let navEnd = thread.endLine ?? thread.startLine ?? 1;
+		let drift: 'relocated' | 'orphaned' | undefined;
+
+		// Drift check for anchorText-bearing threads (uncommitted-file comments that may move as the
+		// working tree changes). Only these pay the file read. `relocateAnchor` never throws.
+		if (thread.anchorText && thread.filePath) {
+			const lines = await this.readFileLines(thread.filePath, lineCache);
+			if (lines === null) {
+				// File missing/unreadable → the anchored line is gone.
+				drift = 'orphaned';
+			} else {
+				const reloc = relocateAnchor(thread.anchorText, thread.startLine, lines);
+				if (reloc.status === 'relocated') {
+					drift = 'relocated';
+					const span = navEnd - navStart;
+					navStart = reloc.line;
+					navEnd = navStart + Math.max(0, span);
+				} else if (reloc.status === 'orphaned') {
+					drift = 'orphaned';
+				}
+			}
+		}
+
+		const loc = thread.filePath ? `${thread.filePath}:${navStart}` : '(no file)';
+
 		return {
 			num,
 			loc,
@@ -153,8 +214,9 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 			threadId: thread.id,
 			hasFile: !!thread.filePath,
 			filePath: thread.filePath,
-			navStart: thread.startLine ?? 1,
-			navEnd: thread.endLine ?? thread.startLine ?? 1,
+			navStart,
+			navEnd,
+			drift,
 			comments: thread.comments.map((c) => this.toWireComment(c)),
 		};
 	}
@@ -250,6 +312,21 @@ const CONVERSATIONS_CSS = `
 .children { display: block; }
 .thread.collapsed > .children { display: none; }
 .crow { padding-left: 20px; color: var(--vscode-foreground); }
+/* Drifted (uncommitted anchor moved/vanished) threads: dim the thread + its comments. */
+.thread.drifted > .row .label,
+.thread.drifted > .row .desc,
+.thread.drifted > .children { opacity: 0.6; }
+.drift-badge {
+	margin-left: 6px;
+	flex: 0 0 auto;
+	background: var(--vscode-editorWarning-foreground, var(--vscode-badge-background));
+	color: var(--vscode-editor-background, var(--vscode-badge-foreground));
+	border-radius: 4px;
+	padding: 0 6px;
+	font-size: 0.8em;
+	line-height: 16px;
+	opacity: 0.9;
+}
 `;
 
 /** Pane-specific script. The shared shell has already defined `vscode`, `reportRendered`, etc. */
@@ -299,7 +376,7 @@ function renderThread(t) {
 	const key = t.threadId || t.num;
 	const open = threadOpen.has(key) ? threadOpen.get(key) : !t.resolved;
 	const el = document.createElement('div');
-	el.className = 'thread' + (open ? '' : ' collapsed');
+	el.className = 'thread' + (open ? '' : ' collapsed') + (t.drift ? ' drifted' : '');
 
 	const row = document.createElement('div');
 	row.className = 'row';
@@ -311,11 +388,15 @@ function renderThread(t) {
 	const actionHtml = t.threadId
 		? '<span class="action" title="' + actionTitle + '">' + actionSvg + '</span>'
 		: '';
+	const driftHtml = t.drift
+		? '<span class="drift-badge" title="This comment is anchored to an uncommitted change and may move or be lost as the working tree changes.">uncommitted — may drift</span>'
+		: '';
 	row.innerHTML =
 		'<span class="twisty">' + CHEVRON_SVG + '</span>' +
 		'<span class="glyph">' + glyph + '</span>' +
 		'<span class="label"></span>' +
 		'<span class="desc"></span>' +
+		driftHtml +
 		actionHtml;
 	row.querySelector('.label').textContent = 'Thread #' + t.num + '  ·  ' + t.loc;
 	row.querySelector('.desc').textContent = t.desc;

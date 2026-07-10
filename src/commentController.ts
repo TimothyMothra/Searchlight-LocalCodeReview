@@ -16,7 +16,7 @@
 
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { authorDisplay, Review, ReviewComment, ReviewThread } from './reviewModel';
+import { authorDisplay, relocateAnchor, Review, ReviewComment, ReviewThread } from './reviewModel';
 import * as store from './reviewStore';
 import { getGitUserName } from './git';
 import type { ActiveComparison } from './activeComparison';
@@ -365,9 +365,26 @@ export class SearchlightCommentController implements vscode.Disposable {
 		if (!fileUri) {
 			return undefined;
 		}
-		const line = Math.max(0, (thread.startLine ?? 1) - 1);
-		const endLine = Math.max(line, (thread.endLine ?? thread.startLine ?? 1) - 1);
-		const range = new vscode.Range(line, 0, endLine, 0);
+		let startLine0 = Math.max(0, (thread.startLine ?? 1) - 1);
+		let endLine0 = Math.max(startLine0, (thread.endLine ?? thread.startLine ?? 1) - 1);
+		// Best-effort relocation for anchorText-bearing threads (uncommitted-file comments that may
+		// drift). Only consult ALREADY-OPEN documents so the render loop never touches disk; if the
+		// file isn't open we leave the recorded range and the Conversations pane still shows drift.
+		if (thread.anchorText) {
+			const openDoc = vscode.workspace.textDocuments.find(
+				(d) => d.uri.scheme === fileUri.scheme && d.uri.fsPath === fileUri.fsPath,
+			);
+			if (openDoc) {
+				const lines = openDoc.getText().split(/\r?\n/);
+				const reloc = relocateAnchor(thread.anchorText, thread.startLine, lines);
+				if (reloc.status === 'relocated') {
+					const span = endLine0 - startLine0;
+					startLine0 = reloc.line - 1;
+					endLine0 = startLine0 + span;
+				}
+			}
+		}
+		const range = new vscode.Range(startLine0, 0, endLine0, 0);
 
 		const vsThread = this.controller.createCommentThread(
 			fileUri,

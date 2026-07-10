@@ -93,6 +93,67 @@ export function normalizeSeq(review: Review): void {
 	}
 }
 
+/**
+ * Relocation status for an uncommitted-file thread whose working-tree content may have drifted
+ * since the comment was created:
+ *   - 'anchored'  — the anchored line's trimmed text still matches at the recorded startLine (or
+ *                   the thread has no anchorText to check). No drift; no badge.
+ *   - 'relocated' — the anchorText was found on a DIFFERENT line (nearby or elsewhere in the file);
+ *                   the caller should move the live range and flag the row as "may drift".
+ *   - 'orphaned'  — the anchorText was not found anywhere in the current file; keep the recorded
+ *                   line and flag the row as "may drift".
+ */
+export type RelocationStatus = 'anchored' | 'relocated' | 'orphaned';
+
+export interface RelocationResult {
+	status: RelocationStatus;
+	/** 1-based line the thread should render at (relocated line, or the recorded line otherwise). */
+	line: number;
+}
+
+/**
+ * Pure, never-throw relocation of an anchored thread against the current file `lines`.
+ *
+ * Search order: exact recorded line → nearest within ±`radius` → first whole-file match. When there
+ * is no `anchorText` (older files / committed-diff threads) the thread is treated as 'anchored' and
+ * left where it is. All inputs are tolerated; a bad startLine simply clamps into range.
+ */
+export function relocateAnchor(
+	anchorText: string | undefined,
+	startLine: number | undefined,
+	lines: string[],
+	radius = 5,
+): RelocationResult {
+	const recorded = typeof startLine === 'number' && startLine >= 1 ? Math.floor(startLine) : 1;
+	const want = typeof anchorText === 'string' ? anchorText.trim() : '';
+	// Nothing to verify (no anchor, empty file) → leave anchored, no badge.
+	if (want === '' || lines.length === 0) {
+		return { status: 'anchored', line: recorded };
+	}
+	const idx0 = Math.min(Math.max(recorded - 1, 0), lines.length - 1);
+	if ((lines[idx0] ?? '').trim() === want) {
+		return { status: 'anchored', line: idx0 + 1 };
+	}
+	// Nearest-first search within ±radius of the recorded line.
+	for (let d = 1; d <= radius; d++) {
+		const up = idx0 - d;
+		const down = idx0 + d;
+		if (up >= 0 && (lines[up] ?? '').trim() === want) {
+			return { status: 'relocated', line: up + 1 };
+		}
+		if (down < lines.length && (lines[down] ?? '').trim() === want) {
+			return { status: 'relocated', line: down + 1 };
+		}
+	}
+	// Whole-file fallback (first match wins).
+	for (let i = 0; i < lines.length; i++) {
+		if ((lines[i] ?? '').trim() === want) {
+			return { status: 'relocated', line: i + 1 };
+		}
+	}
+	return { status: 'orphaned', line: recorded };
+}
+
 /** Coerce an unknown `author` field (string | object | undefined) into a normalized ReviewAuthor. */
 function parseAuthor(raw: unknown): ReviewAuthor | undefined {
 	if (raw === undefined || raw === null) {

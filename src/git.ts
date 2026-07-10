@@ -383,3 +383,62 @@ export async function changedFilesForCommit(cwd: string, sha: string): Promise<s
 		.map((l) => l.trim())
 		.filter((l) => l.length > 0);
 }
+
+/** Tracked working-tree changes, split into staged (index vs HEAD) + unstaged (worktree vs index). */
+export interface UncommittedChanges {
+	/** Files with staged changes: `git diff --cached --name-status` (index vs HEAD). */
+	staged: ChangedFile[];
+	/** Files with unstaged changes: `git diff --name-status` (worktree vs index). */
+	unstaged: ChangedFile[];
+}
+
+/**
+ * Parse `git diff --name-status` output into `ChangedFile[]`, reusing the exact status/path rules
+ * from `changedFiles`: first char of the status field (score dropped for `R100`/`C075`), and the
+ * NEW (last) path for renames/copies. Blank/short lines are skipped.
+ */
+function parseNameStatus(out: string | undefined): ChangedFile[] {
+	if (!out) {
+		return [];
+	}
+	const results: ChangedFile[] = [];
+	for (const raw of out.split(/\r?\n/)) {
+		const line = raw.trim();
+		if (line.length === 0) {
+			continue;
+		}
+		const fields = line.split('\t');
+		if (fields.length < 2) {
+			continue;
+		}
+		const status = fields[0].charAt(0).toUpperCase();
+		const relPath = fields[fields.length - 1].trim();
+		if (relPath.length === 0) {
+			continue;
+		}
+		results.push({ relPath, status });
+	}
+	return results;
+}
+
+/**
+ * Tracked, uncommitted changes in the working tree, split into two SCM-style groups:
+ *   - `staged`   → `git diff --cached --name-status` (index vs HEAD)
+ *   - `unstaged` → `git diff --name-status`          (worktree vs index)
+ *
+ * These are deliberately TRACKED-only: neither command reports untracked files (that would require
+ * `git status --porcelain`, which is out of scope). They operate against the live index/worktree/HEAD
+ * and are independent of any ActiveComparison base/compare shas — so they reflect the repo's real
+ * current edit state regardless of which comparison is selected. Returns empty groups on any failure.
+ */
+export async function changedFilesUncommitted(cwd: string): Promise<UncommittedChanges> {
+	// The two diffs are independent — run them together.
+	const [stagedOut, unstagedOut] = await Promise.all([
+		gitv(['diff', '--cached', '--name-status'], cwd),
+		gitv(['diff', '--name-status'], cwd),
+	]);
+	return {
+		staged: parseNameStatus(stagedOut),
+		unstaged: parseNameStatus(unstagedOut),
+	};
+}

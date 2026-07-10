@@ -46,6 +46,12 @@ export interface ReviewThread {
 	seq?: number;
 	/** v2 only. */
 	tags: string[];
+	/**
+	 * v2, additive: trimmed text of the anchored line captured at thread-create time. Used to
+	 * relocate uncommitted-file threads that drift as the working tree changes. Absent on older
+	 * files and on committed-diff threads that never needed relocation.
+	 */
+	anchorText?: string;
 	comments: ReviewComment[];
 }
 
@@ -170,6 +176,7 @@ function parseThread(raw: unknown): ReviewThread {
 		state: typeof o.state === 'string' ? o.state : undefined,
 		seq: typeof o.seq === 'number' ? o.seq : undefined,
 		tags,
+		anchorText: typeof o.anchorText === 'string' ? o.anchorText : undefined,
 		comments,
 	};
 }

@@ -106,6 +106,7 @@ function serializeThread(thread: ReviewThread): Record<string, unknown> {
 		state: thread.state ?? 'unresolved',
 		...(thread.seq !== undefined ? { seq: thread.seq } : {}),
 		tags: thread.tags,
+		...(thread.anchorText !== undefined ? { anchorText: thread.anchorText } : {}),
 		comments: thread.comments.map(serializeComment),
 	};
 }
@@ -272,6 +273,7 @@ export function addThread(
 	body: string,
 	author: ReviewAuthor,
 	tags: string[] = [],
+	anchorText?: string,
 ): ReviewThread {
 	if (review.seqCounter === undefined) { normalizeSeq(review); }
 	const seq = (review.seqCounter ?? 0) + 1;
@@ -284,6 +286,7 @@ export function addThread(
 		state: 'unresolved',
 		seq,
 		tags: [...tags],
+		...(anchorText !== undefined ? { anchorText } : {}),
 		comments: [
 			{
 				id: newId('c'),

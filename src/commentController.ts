@@ -508,7 +508,22 @@ export class SearchlightCommentController implements vscode.Disposable {
 				target = fresh;
 			}
 		}
-		store.addThread(target, rel, startLine, endLine, body, author, tags);
+		// Capture the trimmed text of the anchored line so uncommitted-file threads can be
+		// relocated when the working tree drifts (uc-5). Best-effort: never block thread creation.
+		let anchorText: string | undefined;
+		if (range) {
+			try {
+				const doc = await vscode.workspace.openTextDocument(reply.thread.uri);
+				const lineIdx = range.start.line;
+				if (lineIdx >= 0 && lineIdx < doc.lineCount) {
+					const t = doc.lineAt(lineIdx).text.trim();
+					if (t.length > 0) { anchorText = t; }
+				}
+			} catch {
+				// Non-file scheme or unreadable document: leave anchorText undefined.
+			}
+		}
+		store.addThread(target, rel, startLine, endLine, body, author, tags, anchorText);
 		await store.saveReview(target);
 		// Keep the active in-memory review authoritative post-write so the NEXT thread's seq
 		// is also computed from a correct set.

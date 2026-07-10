@@ -24,7 +24,7 @@ import { ReviewStatusBar } from './statusBar';
 import * as store from './reviewStore';
 import { webviewHtml, getNonce } from './webviewShell';
 import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
-import { ChangedFile } from './git';
+import { ChangedFile, changedFilesUncommitted } from './git';
 
 /** A folder node in the serializable tree sent to the webview. */
 interface WireDir {
@@ -42,10 +42,28 @@ interface WireFile {
 	status: string;
 }
 
+/** Which uncommitted group a row belongs to (drives the diff sides in uc-3). */
+type UncommittedGroup = 'staged' | 'unstaged';
+
+/** A flat SCM-style row in the Staged/Unstaged sections above the committed tree. */
+interface WireUncommittedFile {
+	/** Basename shown as the label. */
+	name: string;
+	/** Parent dir shown dimmed after the label ('' at repo root). */
+	dir: string;
+	/** Repo-relative, forward-slash path (used for the diff + comment flow). */
+	relPath: string;
+	/** Single-letter git status (M/A/D/R/C/U/T). */
+	status: string;
+	/** 'staged' → index↔HEAD diff; 'unstaged' → worktree↔index diff (wired in uc-3). */
+	group: UncommittedGroup;
+}
+
 type IncomingMessage =
 	| { type: 'ready' }
 	| { type: 'toggleReviewed'; relPath: string }
 	| { type: 'openFile'; relPath: string }
+	| { type: 'openUncommitted'; relPath: string; group: UncommittedGroup }
 	| { type: 'rendered'; view: string; ms: number; count: number };
 
 export class FilesWebviewProvider implements vscode.WebviewViewProvider {
@@ -81,6 +99,13 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 				case 'openFile':
 					if (msg.relPath) {
 						await vscode.commands.executeCommand('searchlight.openFileDiff', msg.relPath);
+					}
+					break;
+				case 'openUncommitted':
+					if (msg.relPath) {
+						// uc-3 implements the group-aware diff; for uc-2 this routes through the same
+						// command with an extra `group` arg (ignored until uc-3 lands).
+						await vscode.commands.executeCommand('searchlight.openFileDiff', msg.relPath, msg.group);
 					}
 					break;
 				default:
@@ -132,7 +157,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		}
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare) {
-			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded });
+			this.view.webview.postMessage({ type: 'state', tree: null, staged: [], unstaged: [], expanded: this.filesExpanded });
 			return;
 		}
 
@@ -164,7 +189,27 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		// at once, so count = total changed files (paths.length). See docs/metrics-baseline.md.
 		const count = this.paths.length;
 		logBuild('files', tBuild, count, tree);
-		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded });
+		// Uncommitted (tracked staged/unstaged) is live working-tree state, independent of the
+		// base...compare pair — load it fresh on every render so edits appear without a key change.
+		const { staged, unstaged } = await this.loadUncommitted(active);
+		this.view.webview.postMessage({ type: 'state', tree, staged, unstaged, expanded: this.filesExpanded });
+	}
+
+	/**
+	 * Load the tracked staged + unstaged changes for the Staged/Unstaged sections. These git ops run
+	 * against the live index/worktree/HEAD, independent of the ActiveComparison base/compare shas.
+	 * Never throws — a git failure just yields empty sections.
+	 */
+	private async loadUncommitted(active: ActiveComparison): Promise<{ staged: WireUncommittedFile[]; unstaged: WireUncommittedFile[] }> {
+		try {
+			const uc = await changedFilesUncommitted(active.repoRootFsPath);
+			return {
+				staged: uc.staged.map((f) => toWireUncommitted(f, 'staged')),
+				unstaged: uc.unstaged.map((f) => toWireUncommitted(f, 'unstaged')),
+			};
+		} catch {
+			return { staged: [], unstaged: [] };
+		}
 	}
 
 	/**
@@ -218,6 +263,14 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 			scriptJs: FILES_JS,
 		});
 	}
+}
+
+/** Map a `ChangedFile` into a flat SCM-style row for the Staged/Unstaged sections. */
+function toWireUncommitted(f: ChangedFile, group: UncommittedGroup): WireUncommittedFile {
+	const slash = f.relPath.lastIndexOf('/');
+	const name = slash === -1 ? f.relPath : f.relPath.slice(slash + 1);
+	const dir = slash === -1 ? '' : f.relPath.slice(0, slash);
+	return { name, dir, relPath: f.relPath, status: f.status, group };
 }
 
 /** Pane-specific CSS (theme vars come from the shared shell). */
@@ -276,6 +329,32 @@ const FILES_CSS = `
 .children { display: block; }
 .dir.collapsed > .children { display: none; }
 input.chk { margin: 0 2px 0 0; }
+/* Staged/Unstaged section headers above the committed tree. */
+.section-header {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 0;
+	cursor: pointer;
+	white-space: nowrap;
+	line-height: 22px;
+	text-transform: uppercase;
+	font-size: 0.85em;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	color: var(--vscode-descriptionForeground);
+}
+.section-header:hover { color: var(--vscode-foreground); }
+.section-header .twisty { transition: transform 0.1s; }
+.section.collapsed .section-header .twisty { transform: rotate(-90deg); }
+.section.collapsed .section-body { display: none; }
+.section-count {
+	margin-left: 6px;
+	opacity: 0.7;
+	font-weight: 400;
+}
+/* Uncommitted (staged/unstaged) rows show a dimmed parent-dir path after the label. */
+.uc-dir { color: var(--vscode-descriptionForeground); margin-left: 6px; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; }
 `;
 
 /** Pane-specific script. The shared shell has already defined `vscode`, `reportRendered`, etc. */
@@ -356,6 +435,67 @@ function renderDir(dir) {
 }
 
 let lastTree = null;
+let staged = [];
+let unstaged = [];
+let sectionCollapsed = new Set();   // section keys that are collapsed
+
+function renderUncommittedRow(f) {
+	const row = document.createElement('div');
+	row.className = 'row file' + (f.status ? ' st-' + f.status : '');
+	const twisty = document.createElement('span');
+	twisty.className = 'twisty spacer';
+	const glyph = document.createElement('span');
+	glyph.className = 'glyph';
+	glyph.innerHTML = FILE_SVG;
+	const label = document.createElement('span');
+	label.className = 'label';
+	label.textContent = f.name;
+	row.appendChild(twisty);
+	row.appendChild(glyph);
+	row.appendChild(label);
+	if (f.dir) {
+		const dir = document.createElement('span');
+		dir.className = 'uc-dir';
+		dir.textContent = f.dir;
+		row.appendChild(dir);
+	}
+	if (f.status) {
+		const st = document.createElement('span');
+		st.className = 'status';
+		st.textContent = f.status;
+		st.title = 'Git status: ' + f.status;
+		row.appendChild(st);
+	}
+	row.addEventListener('click', () => {
+		vscode.postMessage({ type: 'openUncommitted', relPath: f.relPath, group: f.group });
+	});
+	return row;
+}
+
+function renderSection(title, key, files) {
+	const open = !sectionCollapsed.has(key);
+	const el = document.createElement('div');
+	el.className = 'section' + (open ? '' : ' collapsed');
+	const header = document.createElement('div');
+	header.className = 'section-header';
+	header.innerHTML =
+		'<span class="twisty">' + CHEVRON_SVG + '</span>' +
+		'<span class="section-title"></span>' +
+		'<span class="section-count"></span>';
+	header.querySelector('.section-title').textContent = title;
+	header.querySelector('.section-count').textContent = files.length;
+	header.addEventListener('click', () => {
+		if (sectionCollapsed.has(key)) { sectionCollapsed.delete(key); }
+		else { sectionCollapsed.add(key); }
+		paint();
+	});
+	el.appendChild(header);
+	const body = document.createElement('div');
+	body.className = 'section-body';
+	for (const f of files) { body.appendChild(renderUncommittedRow(f)); }
+	el.appendChild(body);
+	return el;
+}
 
 function paint() {
 	const t0 = performance.now();
@@ -365,16 +505,23 @@ function paint() {
 		reportRendered('files', 0, t0);
 		return;
 	}
-	if (!lastTree || (lastTree.dirs.length === 0 && lastTree.files.length === 0)) {
+	// Staged/Unstaged sections render ABOVE the committed (base...compare) tree.
+	if (staged.length) { rows.appendChild(renderSection('Staged', 'staged', staged)); }
+	if (unstaged.length) { rows.appendChild(renderSection('Unstaged', 'unstaged', unstaged)); }
+	const treeEmpty = !lastTree || (lastTree.dirs.length === 0 && lastTree.files.length === 0);
+	if (treeEmpty && !staged.length && !unstaged.length) {
 		rows.innerHTML = '<div class="msg">No changes to review.</div>';
 		reportRendered('files', 0, t0);
 		return;
 	}
-	rows.appendChild(renderDir(lastTree));
-	reportRendered('files', countFiles(lastTree), t0);
+	if (!treeEmpty) {
+		rows.appendChild(renderDir(lastTree));
+	}
+	reportRendered('files', countFiles(lastTree) + staged.length + unstaged.length, t0);
 }
 
 function countFiles(dir) {
+	if (!dir) { return 0; }
 	let n = dir.files.length;
 	for (const d of dir.dirs) { n += countFiles(d); }
 	return n;
@@ -388,6 +535,8 @@ window.addEventListener('message', (e) => {
 		} else {
 			lastTree = m.tree;      // WireDir | null
 		}
+		staged = Array.isArray(m.staged) ? m.staged : [];
+		unstaged = Array.isArray(m.unstaged) ? m.unstaged : [];
 		if (typeof m.expanded === 'boolean') { expandAll = m.expanded; }
 		paint();
 	} else if (m.type === 'setExpanded') {

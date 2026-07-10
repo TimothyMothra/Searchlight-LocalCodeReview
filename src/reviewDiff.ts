@@ -89,6 +89,42 @@ export async function openFileDiff(active: ActiveComparison, relPath: string): P
 	await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title, { preview: false });
 }
 
+/** Which uncommitted group a row belongs to (drives the left/base side of the diff). */
+export type UncommittedGroup = 'staged' | 'unstaged';
+
+/**
+ * Open the native diff editor for a single tracked uncommitted file.
+ *
+ * Left (read-only) side depends on the group, mirroring standard SCM semantics:
+ *   - `staged`   → `HEAD:<path>` (index-vs-HEAD, i.e. the staged change relative to HEAD)
+ *   - `unstaged` → `:0:<path>`   (index content, i.e. the worktree change relative to the index)
+ *
+ * Right side is ALWAYS the live working-tree file (`file://` URI), NOT the compare snapshot. This is
+ * deliberate: the comment controller only attaches threads to real file URIs, so the working file
+ * must be the editable right side for the existing comment flow to work on uncommitted rows. For a
+ * `staged` file with no further unstaged edits, working == index, so `HEAD ↔ working` renders the
+ * same hunks as `HEAD ↔ index`. For a file that is both staged and further edited, the staged diff
+ * shows the combined change — acceptable, since the goal is to enable commenting on uncommitted work.
+ */
+export async function openUncommittedFileDiff(
+	active: ActiveComparison,
+	relPath: string,
+	group: UncommittedGroup,
+): Promise<void> {
+	const cwd = active.repoRootFsPath;
+	if (!cwd || !relPath) {
+		return;
+	}
+	// `git show :0:<path>` serves the stage-0 (normal) index content; `git show HEAD:<path>` the
+	// committed content. Both go through the generic `searchlight-diff` content provider unchanged.
+	const leftRef = group === 'staged' ? 'HEAD' : ':0';
+	const leftLabel = group === 'staged' ? 'HEAD' : 'index';
+	const leftUri = diffUri(relPath, leftRef, cwd);
+	const rightUri = vscode.Uri.file(path.join(cwd, relPath));
+	const title = `${relPath} (${leftLabel} \u2194 working, ${group})`;
+	await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title, { preview: false });
+}
+
 /** Compute whether the compare side is the checked-out HEAD (working tree = right side). */
 function compareIsHead(active: ActiveComparison): boolean {
 	return (

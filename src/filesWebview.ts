@@ -103,9 +103,11 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 					break;
 				case 'openUncommitted':
 					if (msg.relPath) {
-						// uc-3 implements the group-aware diff; for uc-2 this routes through the same
-						// command with an extra `group` arg (ignored until uc-3 lands).
-						await vscode.commands.executeCommand('searchlight.openFileDiff', msg.relPath, msg.group);
+						await vscode.commands.executeCommand(
+							'searchlight.openUncommittedFileDiff',
+							msg.relPath,
+							msg.group,
+						);
 					}
 					break;
 				default:

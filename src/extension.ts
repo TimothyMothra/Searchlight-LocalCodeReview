@@ -38,6 +38,8 @@ import {
 	openAllChangesDiff,
 	openCommitDiff,
 	openCommitFileDiff,
+	openUncommittedFileDiff,
+	UncommittedGroup,
 } from './reviewDiff';
 import { initPerf, perf, perfLine } from './perf';
 
@@ -372,6 +374,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('searchlight.openFileDiff', async (relPath: string) => {
 			await openFileDiff(active, relPath);
 		}),
+		vscode.commands.registerCommand(
+			'searchlight.openUncommittedFileDiff',
+			async (relPath: string, group: UncommittedGroup) => {
+				await openUncommittedFileDiff(active, relPath, group);
+			},
+		),
 		vscode.commands.registerCommand('searchlight.openCommitDiff', async (sha: string) => {
 			await openCommitDiff(active, sha);
 		}),

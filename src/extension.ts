@@ -108,7 +108,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		},
 	);
 	const commitsProvider = new CommitsWebviewProvider(() => active);
-	const conversationsProvider = new ConversationsWebviewProvider(() => active);
+	const conversationsProvider = new ConversationsWebviewProvider(() => active, context.workspaceState);
 	const filesProvider = new FilesWebviewProvider(
 		() => active,
 		statusBar,

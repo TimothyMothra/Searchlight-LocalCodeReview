@@ -56,12 +56,19 @@ type IncomingMessage =
 	| { type: 'navigate'; filePath: string; startLine: number; endLine: number }
 	| { type: 'resolve'; threadId: string }
 	| { type: 'unresolve'; threadId: string }
+	| { type: 'toggleHideResolved' }
 	| { type: 'rendered'; view: string; ms: number; count: number };
+
+/** workspaceState key persisting the show/hide-resolved toggle across reloads. */
+const HIDE_RESOLVED_KEY = 'searchlight.conversations.hideResolved';
 
 export class ConversationsWebviewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 
-	constructor(private readonly getActive: () => ActiveComparison | undefined) {}
+	constructor(
+		private readonly getActive: () => ActiveComparison | undefined,
+		private readonly workspaceState: vscode.Memento,
+	) {}
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
@@ -98,6 +105,14 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 						});
 					}
 					break;
+				case 'toggleHideResolved': {
+					// Host state is authoritative: flip + persist, then re-post so the
+					// webview restores from the stored flag rather than local guesswork.
+					const next = !this.workspaceState.get<boolean>(HIDE_RESOLVED_KEY, false);
+					await this.workspaceState.update(HIDE_RESOLVED_KEY, next);
+					await this.postState();
+					break;
+				}
 				default:
 					if (isRenderedMessage(msg)) {
 						logRendered(msg);
@@ -121,8 +136,9 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 		}
 		const active = this.getActive();
 		const review = active?.review;
+		const hideResolved = this.workspaceState.get<boolean>(HIDE_RESOLVED_KEY, false);
 		if (!review) {
-			this.view.webview.postMessage({ type: 'state', threads: null });
+			this.view.webview.postMessage({ type: 'state', threads: null, hideResolved });
 			return;
 		}
 
@@ -135,7 +151,7 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 			wire.push(await this.toWireThread(review.threads[i], i, lineCache));
 		}
 		logBuild('conversations', tBuild, wire.length, wire);
-		this.view.webview.postMessage({ type: 'state', threads: wire });
+		this.view.webview.postMessage({ type: 'state', threads: wire, hideResolved });
 	}
 
 	/**
@@ -248,7 +264,7 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 			webview,
 			nonce,
 			viewName: 'conversations',
-			bodyHtml: '<div id="rows"></div>',
+			bodyHtml: '<div id="conv-header"></div><div id="rows"></div>',
 			styleCss: CONVERSATIONS_CSS,
 			scriptJs: CONVERSATIONS_JS,
 		});
@@ -258,6 +274,30 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 /** Pane-specific CSS (theme vars come from the shared shell). */
 const CONVERSATIONS_CSS = `
 #rows { user-select: none; }
+/* Header row hosting the show/hide-resolved toggle. */
+#conv-header {
+	display: flex;
+	align-items: center;
+	padding: 2px 12px 4px 12px;
+	min-height: 22px;
+}
+#conv-header:empty { display: none; }
+.toggle-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	background: transparent;
+	border: none;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 2px 4px;
+	border-radius: 4px;
+	font: inherit;
+	font-size: 0.9em;
+}
+.toggle-btn:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+.toggle-btn svg { width: 14px; height: 14px; fill: currentColor; }
+.resolved-hint { margin-left: 6px; opacity: 0.7; font-size: 0.9em; }
 .msg { padding: 6px 12px; color: var(--vscode-descriptionForeground); }
 .row {
 	display: flex;
@@ -332,6 +372,7 @@ const CONVERSATIONS_CSS = `
 /** Pane-specific script. The shared shell has already defined `vscode`, `reportRendered`, etc. */
 const CONVERSATIONS_JS = `
 const rows = document.getElementById('rows');
+const convHeader = document.getElementById('conv-header');
 
 // Inline SVG glyphs (currentColor) — codicons aren't bundled, so no font is loaded.
 const COMMENT_SVG = '<svg viewBox="0 0 16 16"><path d="M2 2h12l1 1v8l-1 1H6l-3 3v-3H2l-1-1V3l1-1zm0 1v8h2v2l2-2h8V3H2z"/></svg>';
@@ -340,8 +381,12 @@ const HUBOT_SVG = '<svg viewBox="0 0 16 16"><path d="M5 2h1v2h4V2h1v2h1.5L14 5.5
 const ACCOUNT_SVG = '<svg viewBox="0 0 16 16"><path d="M8 2a3 3 0 100 6 3 3 0 000-6zm0 1a2 2 0 110 4 2 2 0 010-4zM3 14v-1c0-2 2.2-3 5-3s5 1 5 3v1h-1v-1c0-1.3-1.7-2-4-2s-4 .7-4 2v1H3z"/></svg>';
 const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
 const SLASH_SVG = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 1a7 7 0 100 14A7 7 0 008 1zM2 8a6 6 0 019.75-4.66L3.34 11.75A5.97 5.97 0 012 8zm2.25 4.66A6 6 0 0014 8a5.97 5.97 0 00-1.34-3.75l-8.41 8.41z"/></svg>';
+// Eye / eye-off for the show/hide-resolved toggle.
+const EYE_SVG = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 3C4.5 3 1.7 5.1 0.5 8 1.7 10.9 4.5 13 8 13s6.3-2.1 7.5-5C14.3 5.1 11.5 3 8 3zm0 1c2.9 0 5.3 1.6 6.4 4-1.1 2.4-3.5 4-6.4 4S2.7 10.4 1.6 8C2.7 5.6 5.1 4 8 4zm0 1.5A2.5 2.5 0 108 10.5 2.5 2.5 0 008 5.5zm0 1a1.5 1.5 0 110 3 1.5 1.5 0 010-3z"/></svg>';
+const EYE_OFF_SVG = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M2.7 1.7l-1 1 2.2 2.2C2.5 5.8 1.4 6.8 0.5 8 1.7 10.9 4.5 13 8 13c1.3 0 2.6-.3 3.7-.8l2.6 2.6 1-1L2.7 1.7zM8 4c2.9 0 5.3 1.6 6.4 4-.5 1.1-1.3 2-2.3 2.7L10.7 9.3A2.5 2.5 0 007.7 5.3L6.4 4.1C6.9 4 7.4 4 8 4zM1.6 8C2.3 6.5 3.4 5.4 4.6 4.7l1.5 1.5A2.5 2.5 0 008.8 9l1.3 1.3c-.7.2-1.4.3-2.1.3-2.9 0-5.3-1.6-6.4-4z"/></svg>';
 
 let threads = null;                 // WireThread[] | null
+let hideResolved = false;           // host-authoritative toggle state (restored from state payload)
 const threadOpen = new Map();       // thread key → bool (user override of default open state)
 
 function renderComment(c, t) {
@@ -428,31 +473,70 @@ function renderThread(t) {
 	return el;
 }
 
+function renderHeader(resolvedHiddenCount) {
+	convHeader.innerHTML = '';
+	// Only offer the toggle when there is a real thread list to filter.
+	if (!threads || threads.length === 0) {
+		return;
+	}
+	const btn = document.createElement('button');
+	btn.className = 'toggle-btn';
+	btn.type = 'button';
+	const glyph = hideResolved ? EYE_OFF_SVG : EYE_SVG;
+	const text = hideResolved ? 'Show resolved' : 'Hide resolved';
+	btn.innerHTML = '<span class="glyph">' + glyph + '</span><span class="toggle-label"></span>';
+	btn.querySelector('.toggle-label').textContent = text;
+	btn.title = text;
+	btn.addEventListener('click', () => {
+		// Host is authoritative: it flips + persists + re-posts state.
+		vscode.postMessage({ type: 'toggleHideResolved' });
+	});
+	convHeader.appendChild(btn);
+	if (hideResolved && resolvedHiddenCount > 0) {
+		const hint = document.createElement('span');
+		hint.className = 'resolved-hint';
+		hint.textContent = '(' + resolvedHiddenCount + ' resolved hidden)';
+		convHeader.appendChild(hint);
+	}
+}
+
 function paint() {
 	const t0 = performance.now();
 	rows.innerHTML = '';
 	if (threads === undefined) {
+		convHeader.innerHTML = '';
 		rows.innerHTML = '<div class="msg">Loading conversations…</div>';
 		reportRendered('conversations', 0, t0);
 		return;
 	}
 	if (!threads || threads.length === 0) {
+		convHeader.innerHTML = '';
 		rows.innerHTML = '<div class="msg">No conversations in this review.</div>';
 		reportRendered('conversations', 0, t0);
 		return;
 	}
+	// Host sends every thread; the client hides resolved ones when the toggle is on.
+	const visible = hideResolved ? threads.filter((t) => !t.resolved) : threads;
+	const resolvedHiddenCount = threads.length - visible.length;
+	renderHeader(resolvedHiddenCount);
+	if (visible.length === 0) {
+		rows.innerHTML = '<div class="msg">All conversations are resolved and hidden.</div>';
+		reportRendered('conversations', 0, t0);
+		return;
+	}
 	const frag = document.createDocumentFragment();
-	for (const t of threads) {
+	for (const t of visible) {
 		frag.appendChild(renderThread(t));
 	}
 	rows.appendChild(frag);
-	reportRendered('conversations', threads.length, t0);
+	reportRendered('conversations', visible.length, t0);
 }
 
 window.addEventListener('message', (e) => {
 	const m = e.data;
 	if (m.type === 'state') {
 		threads = m.threads;            // WireThread[] | null
+		hideResolved = !!m.hideResolved;
 		paint();
 	}
 });

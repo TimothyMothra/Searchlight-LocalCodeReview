@@ -43,7 +43,7 @@ interface WireFile {
 }
 
 /** Which uncommitted group a row belongs to (drives the diff sides in uc-3). */
-type UncommittedGroup = 'staged' | 'unstaged';
+type UncommittedGroup = 'staged' | 'unstaged' | 'untracked';
 
 /** A flat SCM-style row in the Staged/Unstaged sections above the committed tree. */
 interface WireUncommittedFile {
@@ -55,7 +55,7 @@ interface WireUncommittedFile {
 	relPath: string;
 	/** Single-letter git status (M/A/D/R/C/U/T). */
 	status: string;
-	/** 'staged' → index↔HEAD diff; 'unstaged' → worktree↔index diff (wired in uc-3). */
+	/** 'staged' → index↔HEAD diff; 'unstaged' → worktree↔index diff; 'untracked' → new-file↔working (wired in uc-3). */
 	group: UncommittedGroup;
 }
 
@@ -198,8 +198,11 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	}
 
 	/**
-	 * Load the tracked staged + unstaged changes for the Staged/Unstaged sections. These git ops run
-	 * against the live index/worktree/HEAD, independent of the ActiveComparison base/compare shas.
+	 * Load the tracked staged + unstaged changes plus untracked files for the Staged/Unstaged sections.
+	 * These git ops run against the live index/worktree/HEAD, independent of the ActiveComparison
+	 * base/compare shas. Untracked rows are merged INTO the `unstaged` array (each keeps its own
+	 * `group: 'untracked'` and `status: 'U'`) so the client renders them inside the single "Unstaged"
+	 * section — no separate section plumbing, and the green `.st-U` badge applies for free.
 	 * Never throws — a git failure just yields empty sections.
 	 */
 	private async loadUncommitted(active: ActiveComparison): Promise<{ staged: WireUncommittedFile[]; unstaged: WireUncommittedFile[] }> {
@@ -207,7 +210,11 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 			const uc = await changedFilesUncommitted(active.repoRootFsPath);
 			return {
 				staged: uc.staged.map((f) => toWireUncommitted(f, 'staged')),
-				unstaged: uc.unstaged.map((f) => toWireUncommitted(f, 'unstaged')),
+				// Tracked-unstaged rows first, then untracked — stable, deterministic order.
+				unstaged: [
+					...uc.unstaged.map((f) => toWireUncommitted(f, 'unstaged')),
+					...uc.untracked.map((f) => toWireUncommitted(f, 'untracked')),
+				],
 			};
 		} catch {
 			return { staged: [], unstaged: [] };

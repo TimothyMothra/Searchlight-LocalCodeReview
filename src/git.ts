@@ -390,6 +390,8 @@ export interface UncommittedChanges {
 	staged: ChangedFile[];
 	/** Files with unstaged changes: `git diff --name-status` (worktree vs index). */
 	unstaged: ChangedFile[];
+	/** Untracked (new, un-added) files honoring `.gitignore`: `git ls-files --others --exclude-standard`. */
+	untracked: ChangedFile[];
 }
 
 /**
@@ -422,23 +424,44 @@ function parseNameStatus(out: string | undefined): ChangedFile[] {
 }
 
 /**
- * Tracked, uncommitted changes in the working tree, split into two SCM-style groups:
- *   - `staged`   → `git diff --cached --name-status` (index vs HEAD)
- *   - `unstaged` → `git diff --name-status`          (worktree vs index)
+ * Uncommitted changes in the working tree, split into three SCM-style groups:
+ *   - `staged`    → `git diff --cached --name-status` (index vs HEAD)
+ *   - `unstaged`  → `git diff --name-status`          (worktree vs index)
+ *   - `untracked` → `git ls-files --others --exclude-standard` (new, un-added files, honoring .gitignore)
  *
- * These are deliberately TRACKED-only: neither command reports untracked files (that would require
- * `git status --porcelain`, which is out of scope). They operate against the live index/worktree/HEAD
- * and are independent of any ActiveComparison base/compare shas — so they reflect the repo's real
- * current edit state regardless of which comparison is selected. Returns empty groups on any failure.
+ * `staged`/`unstaged` are TRACKED-only (neither diff reports untracked files); `untracked` closes that
+ * gap via `ls-files --others`, which lists brand-new files while respecting `.gitignore`. Its output is
+ * bare newline-separated paths (no status column), so each is mapped to status `'U'`. All three ops run
+ * against the live index/worktree/HEAD, independent of any ActiveComparison base/compare shas — so they
+ * reflect the repo's real current edit state regardless of which comparison is selected. Returns empty
+ * groups on any failure.
  */
 export async function changedFilesUncommitted(cwd: string): Promise<UncommittedChanges> {
-	// The two diffs are independent — run them together.
-	const [stagedOut, unstagedOut] = await Promise.all([
+	// The three ops are independent — run them together.
+	const [stagedOut, unstagedOut, untrackedOut] = await Promise.all([
 		gitv(['diff', '--cached', '--name-status'], cwd),
 		gitv(['diff', '--name-status'], cwd),
+		gitv(['ls-files', '--others', '--exclude-standard'], cwd),
 	]);
 	return {
 		staged: parseNameStatus(stagedOut),
 		unstaged: parseNameStatus(unstagedOut),
+		untracked: parseUntracked(untrackedOut),
 	};
+}
+
+/** Parse bare newline-separated paths from `git ls-files --others` into `ChangedFile[]` with status `'U'`. */
+function parseUntracked(out: string | undefined): ChangedFile[] {
+	if (!out) {
+		return [];
+	}
+	const results: ChangedFile[] = [];
+	for (const raw of out.split(/\r?\n/)) {
+		const relPath = raw.trim();
+		if (relPath.length === 0) {
+			continue;
+		}
+		results.push({ relPath, status: 'U' });
+	}
+	return results;
 }

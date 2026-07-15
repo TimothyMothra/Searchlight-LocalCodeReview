@@ -90,14 +90,15 @@ export async function openFileDiff(active: ActiveComparison, relPath: string): P
 }
 
 /** Which uncommitted group a row belongs to (drives the left/base side of the diff). */
-export type UncommittedGroup = 'staged' | 'unstaged';
+export type UncommittedGroup = 'staged' | 'unstaged' | 'untracked';
 
 /**
  * Open the native diff editor for a single tracked uncommitted file.
  *
  * Left (read-only) side depends on the group, mirroring standard SCM semantics:
- *   - `staged`   → `HEAD:<path>` (index-vs-HEAD, i.e. the staged change relative to HEAD)
- *   - `unstaged` → `:0:<path>`   (index content, i.e. the worktree change relative to the index)
+ *   - `staged`    → `HEAD:<path>` (index-vs-HEAD, i.e. the staged change relative to HEAD)
+ *   - `unstaged`  → `:0:<path>`   (index content, i.e. the worktree change relative to the index)
+ *   - `untracked` → EMPTY         (new file exists in neither HEAD nor index, so it shows as all-added)
  *
  * Right side is ALWAYS the live working-tree file (`file://` URI), NOT the compare snapshot. This is
  * deliberate: the comment controller only attaches threads to real file URIs, so the working file
@@ -117,8 +118,13 @@ export async function openUncommittedFileDiff(
 	}
 	// `git show :0:<path>` serves the stage-0 (normal) index content; `git show HEAD:<path>` the
 	// committed content. Both go through the generic `searchlight-diff` content provider unchanged.
-	const leftRef = group === 'staged' ? 'HEAD' : ':0';
-	const leftLabel = group === 'staged' ? 'HEAD' : 'index';
+	// For an untracked file the path exists in neither HEAD nor the index, so `git show HEAD:<path>`
+	// errors and the content provider returns '' — an honest empty left side (whole file = added).
+	const isUntracked = group === 'untracked';
+	// staged & untracked read from HEAD (untracked isn't in HEAD → provider returns '' = empty left);
+	// unstaged reads the stage-0 index content.
+	const leftRef = group === 'unstaged' ? ':0' : 'HEAD';
+	const leftLabel = group === 'staged' ? 'HEAD' : isUntracked ? 'new file' : 'index';
 	const leftUri = diffUri(relPath, leftRef, cwd);
 	const rightUri = vscode.Uri.file(path.join(cwd, relPath));
 	const title = `${relPath} (${leftLabel} \u2194 working, ${group})`;

@@ -24,7 +24,7 @@ import { ReviewStatusBar } from './statusBar';
 import * as store from './reviewStore';
 import { webviewHtml, getNonce } from './webviewShell';
 import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
-import { ChangedFile, changedFilesUncommitted } from './git';
+import { ChangedFile, UncommittedChanges, changedFilesUncommitted } from './git';
 
 /** A folder node in the serializable tree sent to the webview. */
 interface WireDir {
@@ -38,33 +38,40 @@ interface WireDir {
 interface WireFile {
 	name: string;
 	relPath: string;
+	/** Only meaningful for committed leaves (base…compare). Always false for uncommitted leaves. */
 	reviewed: boolean;
 	status: string;
+	/** True → this leaf is a live working-tree change (staged/unstaged/untracked), not a committed diff. */
+	uncommitted: boolean;
+	/** Set only when `uncommitted` — drives the group-aware diff on click. */
+	group?: UncommittedGroup;
 }
 
 /** Which uncommitted group a row belongs to (drives the diff sides in uc-3). */
 type UncommittedGroup = 'staged' | 'unstaged' | 'untracked';
 
-/** A flat SCM-style row in the Staged/Unstaged sections above the committed tree. */
-interface WireUncommittedFile {
-	/** Basename shown as the label. */
-	name: string;
-	/** Parent dir shown dimmed after the label ('' at repo root). */
-	dir: string;
-	/** Repo-relative, forward-slash path (used for the diff + comment flow). */
+/**
+ * A file after merging the committed (base…compare) set with the live uncommitted groups.
+ * One entry per repo-relative path — see `mergeFiles` for the precedence order.
+ */
+interface MergedFile {
 	relPath: string;
-	/** Single-letter git status (M/A/D/R/C/U/T). */
 	status: string;
-	/** 'staged' → index↔HEAD diff; 'unstaged' → worktree↔index diff; 'untracked' → new-file↔working (wired in uc-3). */
-	group: UncommittedGroup;
+	uncommitted: boolean;
+	group?: UncommittedGroup;
+	reviewed: boolean;
 }
 
 type IncomingMessage =
 	| { type: 'ready' }
 	| { type: 'toggleReviewed'; relPath: string }
+	| { type: 'toggleUncommitted' }
 	| { type: 'openFile'; relPath: string }
 	| { type: 'openUncommitted'; relPath: string; group: UncommittedGroup }
 	| { type: 'rendered'; view: string; ms: number; count: number };
+
+/** workspaceState key persisting the show/hide-uncommitted toggle across reloads (default false = shown). */
+const HIDE_UNCOMMITTED_KEY = 'searchlight.files.hideUncommitted';
 
 export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
@@ -79,6 +86,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		private readonly getActive: () => ActiveComparison | undefined,
 		private readonly statusBar: ReviewStatusBar,
 		private readonly refreshConversations: () => void,
+		private readonly workspaceState: vscode.Memento,
 	) {}
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -110,6 +118,14 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 						);
 					}
 					break;
+				case 'toggleUncommitted': {
+					// Host state is authoritative: flip + persist, then re-post so the webview
+					// restores from the stored flag rather than local guesswork.
+					const next = !this.workspaceState.get<boolean>(HIDE_UNCOMMITTED_KEY, false);
+					await this.workspaceState.update(HIDE_UNCOMMITTED_KEY, next);
+					await this.postState();
+					break;
+				}
 				default:
 					if (isRenderedMessage(msg)) {
 						logRendered(msg);
@@ -157,9 +173,10 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		if (!this.view) {
 			return;
 		}
+		const hideUncommitted = this.workspaceState.get<boolean>(HIDE_UNCOMMITTED_KEY, false);
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare) {
-			this.view.webview.postMessage({ type: 'state', tree: null, staged: [], unstaged: [], expanded: this.filesExpanded });
+			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0 });
 			return;
 		}
 
@@ -181,55 +198,51 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 						this.loadingKey = undefined;
 					});
 			}
-			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded });
+			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0 });
 			return;
 		}
 
-		const tBuild = Date.now();
-		const tree = this.buildTree(this.paths, active.review?.reviewedFiles ?? []);
-		// count basis: filesView.ts's files.build counted ROOT rows; the webview builds the whole tree
-		// at once, so count = total changed files (paths.length). See docs/metrics-baseline.md.
-		const count = this.paths.length;
-		logBuild('files', tBuild, count, tree);
-		// Uncommitted (tracked staged/unstaged) is live working-tree state, independent of the
+		// Uncommitted (staged/unstaged/untracked) is live working-tree state, independent of the
 		// base...compare pair — load it fresh on every render so edits appear without a key change.
-		const { staged, unstaged } = await this.loadUncommitted(active);
-		this.view.webview.postMessage({ type: 'state', tree, staged, unstaged, expanded: this.filesExpanded });
+		const uc = await this.loadUncommitted(active);
+		const tBuild = Date.now();
+		const merged = mergeFiles(this.paths, uc, active.review?.reviewedFiles ?? []);
+		const ucTotal = merged.reduce((n, f) => (f.uncommitted ? n + 1 : n), 0);
+		// When hidden, drop uncommitted leaves entirely (folders that become empty simply aren't built).
+		// NOTE: because "uncommitted wins" dedup collapses a file that is BOTH committed and edited into a
+		// single uncommitted leaf, hiding uncommitted also hides that file's committed row. This is the
+		// documented consequence of the locked precedence order (untracked > unstaged > staged > committed).
+		const visible = hideUncommitted ? merged.filter((f) => !f.uncommitted) : merged;
+		const tree = this.buildTree(visible);
+		// count = merged visible leaves (respects the hide filter) — the whole tree is built at once.
+		const count = visible.length;
+		logBuild('files', tBuild, count, tree);
+		const ucHidden = hideUncommitted ? ucTotal : 0;
+		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden });
 	}
 
 	/**
-	 * Load the tracked staged + unstaged changes plus untracked files for the Staged/Unstaged sections.
-	 * These git ops run against the live index/worktree/HEAD, independent of the ActiveComparison
-	 * base/compare shas. Untracked rows are merged INTO the `unstaged` array (each keeps its own
-	 * `group: 'untracked'` and `status: 'U'`) so the client renders them inside the single "Unstaged"
-	 * section — no separate section plumbing, and the green `.st-U` badge applies for free.
-	 * Never throws — a git failure just yields empty sections.
+	 * Load the live staged + unstaged + untracked changes for merging into the unified tree. These git
+	 * ops run against the live index/worktree/HEAD, independent of the ActiveComparison base/compare
+	 * shas. Returns the raw groups (not wire rows) so `mergeFiles` can weave them into the folder tree
+	 * by path. Never throws — a git failure just yields empty groups.
 	 */
-	private async loadUncommitted(active: ActiveComparison): Promise<{ staged: WireUncommittedFile[]; unstaged: WireUncommittedFile[] }> {
+	private async loadUncommitted(active: ActiveComparison): Promise<UncommittedChanges> {
 		try {
-			const uc = await changedFilesUncommitted(active.repoRootFsPath);
-			return {
-				staged: uc.staged.map((f) => toWireUncommitted(f, 'staged')),
-				// Tracked-unstaged rows first, then untracked — stable, deterministic order.
-				unstaged: [
-					...uc.unstaged.map((f) => toWireUncommitted(f, 'unstaged')),
-					...uc.untracked.map((f) => toWireUncommitted(f, 'untracked')),
-				],
-			};
+			return await changedFilesUncommitted(active.repoRootFsPath);
 		} catch {
-			return { staged: [], unstaged: [] };
+			return { staged: [], unstaged: [], untracked: [] };
 		}
 	}
 
 	/**
-	 * Split paths into a nested folder tree (folders-first, then alphabetical at each level) —
+	 * Split merged files into a nested folder tree (folders-first, then alphabetical at each level) —
 	 * the same shape filesView.ts's buildTree/renderLevel produced, but serializable.
 	 */
-	private buildTree(paths: ChangedFile[], reviewedFiles: string[]): WireDir {
-		const reviewed = new Set(reviewedFiles);
+	private buildTree(files: MergedFile[]): WireDir {
 		const root: WireDir = { name: '', relPath: '', dirs: [], files: [] };
 
-		for (const p of paths) {
+		for (const p of files) {
 			const segments = p.relPath.split('/');
 			let node = root;
 			// Interior segments → nested dirs.
@@ -245,7 +258,14 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 			}
 			// Last segment → file leaf.
 			const name = segments[segments.length - 1];
-			node.files.push({ name, relPath: p.relPath, reviewed: reviewed.has(p.relPath), status: p.status });
+			node.files.push({
+				name,
+				relPath: p.relPath,
+				reviewed: p.reviewed,
+				status: p.status,
+				uncommitted: p.uncommitted,
+				group: p.group,
+			});
 		}
 
 		this.sortLevel(root);
@@ -267,24 +287,72 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 			webview,
 			nonce,
 			viewName: 'files',
-			bodyHtml: '<div id="rows"></div>',
+			bodyHtml: '<div id="files-header"></div><div id="rows"></div>',
 			styleCss: FILES_CSS,
 			scriptJs: FILES_JS,
 		});
 	}
 }
 
-/** Map a `ChangedFile` into a flat SCM-style row for the Staged/Unstaged sections. */
-function toWireUncommitted(f: ChangedFile, group: UncommittedGroup): WireUncommittedFile {
-	const slash = f.relPath.lastIndexOf('/');
-	const name = slash === -1 ? f.relPath : f.relPath.slice(slash + 1);
-	const dir = slash === -1 ? '' : f.relPath.slice(0, slash);
-	return { name, dir, relPath: f.relPath, status: f.status, group };
+/**
+ * Merge the committed (base…compare) changed files with the live uncommitted groups into ONE row per
+ * repo-relative path. Precedence (total order, last wins): `untracked > unstaged > staged > committed`.
+ * So a file that is both committed AND edited in the working tree shows once as its uncommitted row; a
+ * file both staged and unstaged shows once as unstaged.
+ *
+ * // ASSUMPTION: unstaged > staged precedence is chosen because the working-tree version reflects the
+ * // current on-disk state the user is looking at; the staged+unstaged overlap is rare. Flip the overlay
+ * // order below (apply unstaged before staged) if you want staged to win instead.
+ *
+ * Reviewed state applies ONLY to committed leaves (it is a durable base…compare concept); uncommitted
+ * leaves are transient and always `reviewed:false` (the client suppresses their checkbox).
+ */
+function mergeFiles(committed: ChangedFile[], uc: UncommittedChanges, reviewedFiles: string[]): MergedFile[] {
+	const reviewed = new Set(reviewedFiles);
+	const map = new Map<string, MergedFile>();
+	// 1. committed base (lowest precedence)
+	for (const f of committed) {
+		map.set(f.relPath, { relPath: f.relPath, status: f.status, uncommitted: false, reviewed: reviewed.has(f.relPath) });
+	}
+	// 2..4. overlay uncommitted groups in ascending precedence — each overwrites the prior entry.
+	const overlay = (files: ChangedFile[], group: UncommittedGroup): void => {
+		for (const f of files) {
+			map.set(f.relPath, { relPath: f.relPath, status: f.status, uncommitted: true, group, reviewed: false });
+		}
+	};
+	overlay(uc.staged, 'staged');
+	overlay(uc.unstaged, 'unstaged');
+	overlay(uc.untracked, 'untracked');
+	return [...map.values()];
 }
 
 /** Pane-specific CSS (theme vars come from the shared shell). */
 const FILES_CSS = `
 #rows { user-select: none; }
+/* Header row hosting the show/hide-uncommitted toggle (mirrors the Conversations pane header). */
+#files-header {
+	display: flex;
+	align-items: center;
+	padding: 2px 12px 4px 12px;
+	min-height: 22px;
+}
+#files-header:empty { display: none; }
+.toggle-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	background: transparent;
+	border: none;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 2px 4px;
+	border-radius: 4px;
+	font: inherit;
+	font-size: 0.9em;
+}
+.toggle-btn:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+.toggle-btn svg { width: 14px; height: 14px; fill: currentColor; }
+.uc-hint { margin-left: 6px; opacity: 0.7; font-size: 0.9em; }
 .msg { padding: 6px 12px; color: var(--vscode-descriptionForeground); }
 .row {
 	display: flex;
@@ -327,56 +395,73 @@ const FILES_CSS = `
 	font-size: 0.85em;
 	opacity: 0.9;
 }
+/* Leading working-tree marker on uncommitted leaves (● colored by status). */
+.uc-marker {
+	width: 10px;
+	min-width: 10px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0.8em;
+	line-height: 1;
+}
+/* Uncommitted leaves read italic (transient working-tree edit, not a durable committed diff). */
+.file.uncommitted .label { font-style: italic; }
 /* Per-status decoration colors (mirror VS Code's native SCM/file-explorer coloring). */
-.file.st-M .label, .file.st-M .status { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
-.file.st-A .label, .file.st-A .status { color: var(--vscode-gitDecoration-addedResourceForeground); }
-.file.st-D .label, .file.st-D .status { color: var(--vscode-gitDecoration-deletedResourceForeground); }
-.file.st-R .label, .file.st-R .status { color: var(--vscode-gitDecoration-renamedResourceForeground); }
-.file.st-C .label, .file.st-C .status { color: var(--vscode-gitDecoration-renamedResourceForeground); }
-.file.st-U .label, .file.st-U .status { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
-.file.st-T .label, .file.st-T .status { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+.file.st-M .label, .file.st-M .status, .file.st-M .uc-marker { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+.file.st-A .label, .file.st-A .status, .file.st-A .uc-marker { color: var(--vscode-gitDecoration-addedResourceForeground); }
+.file.st-D .label, .file.st-D .status, .file.st-D .uc-marker { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+.file.st-R .label, .file.st-R .status, .file.st-R .uc-marker { color: var(--vscode-gitDecoration-renamedResourceForeground); }
+.file.st-C .label, .file.st-C .status, .file.st-C .uc-marker { color: var(--vscode-gitDecoration-renamedResourceForeground); }
+.file.st-U .label, .file.st-U .status, .file.st-U .uc-marker { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
+.file.st-T .label, .file.st-T .status, .file.st-T .uc-marker { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
 .children { display: block; }
 .dir.collapsed > .children { display: none; }
 input.chk { margin: 0 2px 0 0; }
-/* Staged/Unstaged section headers above the committed tree. */
-.section-header {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	padding: 2px 0;
-	cursor: pointer;
-	white-space: nowrap;
-	line-height: 22px;
-	text-transform: uppercase;
-	font-size: 0.85em;
-	font-weight: 600;
-	letter-spacing: 0.04em;
-	color: var(--vscode-descriptionForeground);
-}
-.section-header:hover { color: var(--vscode-foreground); }
-.section-header .twisty { transition: transform 0.1s; }
-.section.collapsed .section-header .twisty { transform: rotate(-90deg); }
-.section.collapsed .section-body { display: none; }
-.section-count {
-	margin-left: 6px;
-	opacity: 0.7;
-	font-weight: 400;
-}
-/* Uncommitted (staged/unstaged) rows show a dimmed parent-dir path after the label. */
-.uc-dir { color: var(--vscode-descriptionForeground); margin-left: 6px; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; }
 `;
 
 /** Pane-specific script. The shared shell has already defined `vscode`, `reportRendered`, etc. */
 const FILES_JS = `
+const filesHeader = document.getElementById('files-header');
 const rows = document.getElementById('rows');
 
 // Inline SVG glyphs (currentColor) — codicons aren't bundled, so no font is loaded.
 const FILE_SVG = '<svg viewBox="0 0 16 16"><path d="M9.5 1H3.5L3 1.5v13l.5.5h9l.5-.5V5.5L9.5 1zm0 1.4L11.6 4.5H9.5V2.4zM4 14V2h4.5v3.5H12V14H4z"/></svg>';
 const FOLDER_SVG = '<svg viewBox="0 0 16 16"><path d="M14.5 3H7.7l-1-1H1.5L1 2.5v11l.5.5h13l.5-.5v-10L14.5 3zM14 13H2V3h4.3l1 1H14v9z"/></svg>';
 const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
+const EYE_SVG = '<svg viewBox="0 0 16 16"><path d="M8 3C4.5 3 1.7 5.1.5 8c1.2 2.9 4 5 7.5 5s6.3-2.1 7.5-5C14.3 5.1 11.5 3 8 3zm0 8.3A3.3 3.3 0 1 1 8 4.7a3.3 3.3 0 0 1 0 6.6zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>';
+const EYE_OFF_SVG = '<svg viewBox="0 0 16 16"><path d="M13.5 2.5l-11 11 .7.7 2.2-2.2c.8.3 1.7.5 2.6.5 3.5 0 6.3-2.1 7.5-5a8.6 8.6 0 0 0-2.9-3.7l1.6-1.6-.7-.7zM8 11.3a3.3 3.3 0 0 1-2.3-5.6l1 1a2 2 0 0 0 2.6 2.6l1 1c-.6.4-1.4.6-2.3.6zM8 4.7c1.8 0 3.3 1.5 3.3 3.3 0 .5-.1.9-.3 1.3l1.5 1.5c.6-.6 1.1-1.3 1.5-2.1C12.3 5.6 10.4 4 8 4c-.6 0-1.2.1-1.8.3l1.2 1.2c.2 0 .4-.1.6-.1z"/></svg>';
 
 let expanded = new Set();      // relPaths of expanded folders
 let expandAll = false;
+let lastTree = null;           // WireDir | null | undefined(sentinel → loading)
+let hideUncommitted = false;   // host-authoritative; restored on first paint
+let ucHidden = 0;              // count of uncommitted leaves the host filtered out
+
+function renderHeader() {
+	filesHeader.innerHTML = '';
+	// Only offer the toggle when there is a tree to filter (avoids a lone control on an empty pane).
+	const treeEmpty = !lastTree || (lastTree.dirs.length === 0 && lastTree.files.length === 0);
+	if (lastTree === undefined || treeEmpty) { return; }
+	const btn = document.createElement('button');
+	btn.className = 'toggle-btn';
+	btn.type = 'button';
+	const glyph = hideUncommitted ? EYE_OFF_SVG : EYE_SVG;
+	const label = hideUncommitted ? 'Show uncommitted' : 'Hide uncommitted';
+	btn.innerHTML = glyph + '<span></span>';
+	btn.querySelector('span').textContent = label;
+	btn.title = label;
+	btn.addEventListener('click', () => {
+		vscode.postMessage({ type: 'toggleUncommitted' });
+	});
+	filesHeader.appendChild(btn);
+	if (hideUncommitted && ucHidden > 0) {
+		const hint = document.createElement('span');
+		hint.className = 'uc-hint';
+		hint.textContent = '(' + ucHidden + ' hidden)';
+		filesHeader.appendChild(hint);
+	}
+}
 
 function renderDir(dir) {
 	const frag = document.createDocumentFragment();
@@ -406,127 +491,91 @@ function renderDir(dir) {
 	}
 	for (const f of dir.files) {
 		const row = document.createElement('div');
-		row.className = 'row file' + (f.status ? ' st-' + f.status : '');
-		const chk = document.createElement('input');
-		chk.type = 'checkbox';
-		chk.className = 'chk';
-		chk.checked = !!f.reviewed;
-		chk.title = 'Mark reviewed';
-		chk.addEventListener('click', (e) => e.stopPropagation());
-		chk.addEventListener('change', () => {
-			vscode.postMessage({ type: 'toggleReviewed', relPath: f.relPath });
-		});
+		row.className = 'row file' + (f.status ? ' st-' + f.status : '') + (f.uncommitted ? ' uncommitted' : '');
 		const twisty = document.createElement('span');
 		twisty.className = 'twisty spacer';
-		const glyph = document.createElement('span');
-		glyph.className = 'glyph';
-		glyph.innerHTML = FILE_SVG;
-		const label = document.createElement('span');
-		label.className = 'label';
-		label.textContent = f.name;
-		row.appendChild(twisty);
-		row.appendChild(chk);
-		row.appendChild(glyph);
-		row.appendChild(label);
-		if (f.status) {
-			const st = document.createElement('span');
-			st.className = 'status';
-			st.textContent = f.status;
-			st.title = 'Git status: ' + f.status;
-			row.appendChild(st);
+		if (f.uncommitted) {
+			// Uncommitted leaf: leading working-tree marker (● colored by status), NO reviewed checkbox
+			// (reviewed is a durable base…compare concept; uncommitted files are transient).
+			const marker = document.createElement('span');
+			marker.className = 'uc-marker';
+			marker.textContent = '\\u25CF';
+			marker.title = 'Working-tree change (uncommitted)';
+			const glyph = document.createElement('span');
+			glyph.className = 'glyph';
+			glyph.innerHTML = FILE_SVG;
+			const label = document.createElement('span');
+			label.className = 'label';
+			label.textContent = f.name;
+			row.appendChild(twisty);
+			row.appendChild(marker);
+			row.appendChild(glyph);
+			row.appendChild(label);
+			if (f.status) {
+				const st = document.createElement('span');
+				st.className = 'status';
+				st.textContent = f.status;
+				st.title = 'Git status: ' + f.status;
+				row.appendChild(st);
+			}
+			row.addEventListener('click', () => {
+				vscode.postMessage({ type: 'openUncommitted', relPath: f.relPath, group: f.group });
+			});
+		} else {
+			// Committed leaf: reviewed checkbox + base…compare diff on click (unchanged behavior).
+			const chk = document.createElement('input');
+			chk.type = 'checkbox';
+			chk.className = 'chk';
+			chk.checked = !!f.reviewed;
+			chk.title = 'Mark reviewed';
+			chk.addEventListener('click', (e) => e.stopPropagation());
+			chk.addEventListener('change', () => {
+				vscode.postMessage({ type: 'toggleReviewed', relPath: f.relPath });
+			});
+			const glyph = document.createElement('span');
+			glyph.className = 'glyph';
+			glyph.innerHTML = FILE_SVG;
+			const label = document.createElement('span');
+			label.className = 'label';
+			label.textContent = f.name;
+			row.appendChild(twisty);
+			row.appendChild(chk);
+			row.appendChild(glyph);
+			row.appendChild(label);
+			if (f.status) {
+				const st = document.createElement('span');
+				st.className = 'status';
+				st.textContent = f.status;
+				st.title = 'Git status: ' + f.status;
+				row.appendChild(st);
+			}
+			row.addEventListener('click', () => {
+				vscode.postMessage({ type: 'openFile', relPath: f.relPath });
+			});
 		}
-		row.addEventListener('click', () => {
-			vscode.postMessage({ type: 'openFile', relPath: f.relPath });
-		});
 		frag.appendChild(row);
 	}
 	return frag;
 }
 
-let lastTree = null;
-let staged = [];
-let unstaged = [];
-let sectionCollapsed = new Set();   // section keys that are collapsed
-
-function renderUncommittedRow(f) {
-	const row = document.createElement('div');
-	row.className = 'row file' + (f.status ? ' st-' + f.status : '');
-	const twisty = document.createElement('span');
-	twisty.className = 'twisty spacer';
-	const glyph = document.createElement('span');
-	glyph.className = 'glyph';
-	glyph.innerHTML = FILE_SVG;
-	const label = document.createElement('span');
-	label.className = 'label';
-	label.textContent = f.name;
-	row.appendChild(twisty);
-	row.appendChild(glyph);
-	row.appendChild(label);
-	if (f.dir) {
-		const dir = document.createElement('span');
-		dir.className = 'uc-dir';
-		dir.textContent = f.dir;
-		row.appendChild(dir);
-	}
-	if (f.status) {
-		const st = document.createElement('span');
-		st.className = 'status';
-		st.textContent = f.status;
-		st.title = 'Git status: ' + f.status;
-		row.appendChild(st);
-	}
-	row.addEventListener('click', () => {
-		vscode.postMessage({ type: 'openUncommitted', relPath: f.relPath, group: f.group });
-	});
-	return row;
-}
-
-function renderSection(title, key, files) {
-	const open = !sectionCollapsed.has(key);
-	const el = document.createElement('div');
-	el.className = 'section' + (open ? '' : ' collapsed');
-	const header = document.createElement('div');
-	header.className = 'section-header';
-	header.innerHTML =
-		'<span class="twisty">' + CHEVRON_SVG + '</span>' +
-		'<span class="section-title"></span>' +
-		'<span class="section-count"></span>';
-	header.querySelector('.section-title').textContent = title;
-	header.querySelector('.section-count').textContent = files.length;
-	header.addEventListener('click', () => {
-		if (sectionCollapsed.has(key)) { sectionCollapsed.delete(key); }
-		else { sectionCollapsed.add(key); }
-		paint();
-	});
-	el.appendChild(header);
-	const body = document.createElement('div');
-	body.className = 'section-body';
-	for (const f of files) { body.appendChild(renderUncommittedRow(f)); }
-	el.appendChild(body);
-	return el;
-}
-
 function paint() {
 	const t0 = performance.now();
+	renderHeader();
 	rows.innerHTML = '';
 	if (lastTree === undefined) {
 		rows.innerHTML = '<div class="msg">Loading changes…</div>';
 		reportRendered('files', 0, t0);
 		return;
 	}
-	// Staged/Unstaged sections render ABOVE the committed (base...compare) tree.
-	if (staged.length) { rows.appendChild(renderSection('Staged', 'staged', staged)); }
-	if (unstaged.length) { rows.appendChild(renderSection('Unstaged', 'unstaged', unstaged)); }
 	const treeEmpty = !lastTree || (lastTree.dirs.length === 0 && lastTree.files.length === 0);
-	if (treeEmpty && !staged.length && !unstaged.length) {
+	if (treeEmpty) {
 		rows.innerHTML = '<div class="msg">No changes to review.</div>';
 		reportRendered('files', 0, t0);
 		return;
 	}
-	if (!treeEmpty) {
-		rows.appendChild(renderDir(lastTree));
-	}
-	reportRendered('files', countFiles(lastTree) + staged.length + unstaged.length, t0);
+	rows.appendChild(renderDir(lastTree));
+	// Host already filtered hidden uncommitted leaves, so the tree = the visible leaf set.
+	reportRendered('files', countFiles(lastTree), t0);
 }
 
 function countFiles(dir) {
@@ -544,8 +593,8 @@ window.addEventListener('message', (e) => {
 		} else {
 			lastTree = m.tree;      // WireDir | null
 		}
-		staged = Array.isArray(m.staged) ? m.staged : [];
-		unstaged = Array.isArray(m.unstaged) ? m.unstaged : [];
+		if (typeof m.hideUncommitted === 'boolean') { hideUncommitted = m.hideUncommitted; }
+		ucHidden = typeof m.ucHidden === 'number' ? m.ucHidden : 0;
 		if (typeof m.expanded === 'boolean') { expandAll = m.expanded; }
 		paint();
 	} else if (m.type === 'setExpanded') {

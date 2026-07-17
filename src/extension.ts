@@ -113,6 +113,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		() => active,
 		statusBar,
 		() => conversationsProvider.refresh(),
+		context.workspaceState,
 	);
 
 	context.subscriptions.push(

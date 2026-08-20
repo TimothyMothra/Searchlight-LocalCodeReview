@@ -38,7 +38,7 @@ interface WireDir {
 interface WireFile {
 	name: string;
 	relPath: string;
-	/** Only meaningful for committed leaves (base…compare). Always false for uncommitted leaves. */
+	/** Reviewed state is shared by committed and uncommitted leaves (one row per path ⇒ one entry). */
 	reviewed: boolean;
 	status: string;
 	/** True → this leaf is a live working-tree change (staged/unstaged/untracked), not a committed diff. */
@@ -333,8 +333,13 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
  * // current on-disk state the user is looking at; the staged+unstaged overlap is rare. Flip the overlay
  * // order below (apply unstaged before staged) if you want staged to win instead.
  *
- * Reviewed state applies ONLY to committed leaves (it is a durable base…compare concept); uncommitted
- * leaves are transient and always `reviewed:false` (the client suppresses their checkbox).
+ * Reviewed state is shared by committed and uncommitted rows: both consult the same
+ * `review.reviewedFiles` list. This is unambiguous because the merged tree is deduped to exactly ONE
+ * row per repo-relative path, so one path ⇒ one checkbox ⇒ one list entry.
+ *
+ * // ASSUMPTION: a file reviewed while committed-only keeps its checkmark if it later gains
+ * // working-tree edits. Auto-clearing the mark on content change (via hashing or an mtime watch) was
+ * // deliberately NOT implemented — staleness on uncommitted rows is accepted.
  */
 function mergeFiles(committed: ChangedFile[], uc: UncommittedChanges, reviewedFiles: string[]): MergedFile[] {
 	const reviewed = new Set(reviewedFiles);
@@ -346,7 +351,7 @@ function mergeFiles(committed: ChangedFile[], uc: UncommittedChanges, reviewedFi
 	// 2..4. overlay uncommitted groups in ascending precedence — each overwrites the prior entry.
 	const overlay = (files: ChangedFile[], group: UncommittedGroup): void => {
 		for (const f of files) {
-			map.set(f.relPath, { relPath: f.relPath, status: f.status, uncommitted: true, group, reviewed: false });
+			map.set(f.relPath, { relPath: f.relPath, status: f.status, uncommitted: true, group, reviewed: reviewed.has(f.relPath) });
 		}
 	};
 	overlay(uc.staged, 'staged');
@@ -525,8 +530,18 @@ function renderDir(dir, depth) {
 		const twisty = document.createElement('span');
 		twisty.className = 'twisty spacer';
 		if (f.uncommitted) {
-			// Uncommitted leaf: leading working-tree marker (● colored by status), NO reviewed checkbox
-			// (reviewed is a durable base…compare concept; uncommitted files are transient).
+			// Uncommitted leaf: reviewed checkbox (shared with committed rows — one row per path) plus a
+			// leading working-tree marker (● colored by status). The checkbox is appended before the
+			// marker so checkboxes line up in one column across committed and uncommitted rows.
+			const chk = document.createElement('input');
+			chk.type = 'checkbox';
+			chk.className = 'chk';
+			chk.checked = !!f.reviewed;
+			chk.title = 'Mark reviewed';
+			chk.addEventListener('click', (e) => e.stopPropagation());   // don't trigger the row's diff-open
+			chk.addEventListener('change', () => {
+				vscode.postMessage({ type: 'toggleReviewed', relPath: f.relPath });
+			});
 			const marker = document.createElement('span');
 			marker.className = 'uc-marker';
 			marker.textContent = '\\u25CF';
@@ -538,6 +553,7 @@ function renderDir(dir, depth) {
 			label.className = 'label';
 			label.textContent = f.name;
 			row.appendChild(twisty);
+			row.appendChild(chk);
 			row.appendChild(marker);
 			row.appendChild(glyph);
 			row.appendChild(label);

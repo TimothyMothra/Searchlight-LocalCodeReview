@@ -65,13 +65,32 @@ interface MergedFile {
 type IncomingMessage =
 	| { type: 'ready' }
 	| { type: 'toggleReviewed'; relPath: string }
-	| { type: 'toggleUncommitted' }
 	| { type: 'openFile'; relPath: string }
 	| { type: 'openUncommitted'; relPath: string; group: UncommittedGroup }
 	| { type: 'rendered'; view: string; ms: number; count: number };
 
 /** workspaceState key persisting the show/hide-uncommitted toggle across reloads (default false = shown). */
 const HIDE_UNCOMMITTED_KEY = 'searchlight.files.hideUncommitted';
+
+/**
+ * Context key backing the `view/title` show/hide-uncommitted buttons. It must be seeded on activation
+ * (not only on toggle) so a user who reloads while in the hidden state still gets the "Show" button.
+ */
+const HIDE_UNCOMMITTED_CONTEXT = 'searchlight.filesUncommittedHidden';
+
+/** Read the persisted hide-uncommitted flag (default false = uncommitted shown). */
+export function isUncommittedHidden(workspaceState: vscode.Memento): boolean {
+	return workspaceState.get<boolean>(HIDE_UNCOMMITTED_KEY, false);
+}
+
+/** Push the persisted flag into the context key that gates the title-bar buttons. */
+export async function syncUncommittedContext(workspaceState: vscode.Memento): Promise<void> {
+	await vscode.commands.executeCommand(
+		'setContext',
+		HIDE_UNCOMMITTED_CONTEXT,
+		isUncommittedHidden(workspaceState),
+	);
+}
 
 export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
@@ -118,14 +137,6 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 						);
 					}
 					break;
-				case 'toggleUncommitted': {
-					// Host state is authoritative: flip + persist, then re-post so the webview
-					// restores from the stored flag rather than local guesswork.
-					const next = !this.workspaceState.get<boolean>(HIDE_UNCOMMITTED_KEY, false);
-					await this.workspaceState.update(HIDE_UNCOMMITTED_KEY, next);
-					await this.postState();
-					break;
-				}
 				default:
 					if (isRenderedMessage(msg)) {
 						logRendered(msg);
@@ -140,6 +151,18 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	/** External refresh (called by refreshAll / after a checkbox toggle). */
 	refresh(): void {
 		void this.postState();
+	}
+
+	/**
+	 * Show/hide uncommitted working-tree rows. Driven by the `view/title` buttons rather than an
+	 * in-tree control: a control rendered inside the webview disappeared along with the rows it
+	 * filtered when hiding emptied the tree, which (because the flag is persisted) locked the user
+	 * out permanently. The title bar renders independently of webview content, so it cannot self-hide.
+	 */
+	async setHideUncommitted(value: boolean): Promise<void> {
+		await this.workspaceState.update(HIDE_UNCOMMITTED_KEY, value);
+		await syncUncommittedContext(this.workspaceState);
+		await this.postState();
 	}
 
 	/** Expand-all (host command `searchlight.filesExpandAll`) / collapse. */
@@ -173,7 +196,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		if (!this.view) {
 			return;
 		}
-		const hideUncommitted = this.workspaceState.get<boolean>(HIDE_UNCOMMITTED_KEY, false);
+		const hideUncommitted = isUncommittedHidden(this.workspaceState);
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare) {
 			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0 });
@@ -293,7 +316,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 			webview,
 			nonce,
 			viewName: 'files',
-			bodyHtml: '<div id="files-header"></div><div id="rows"></div>',
+			bodyHtml: '<div id="rows"></div>',
 			styleCss: FILES_CSS,
 			scriptJs: FILES_JS,
 		});
@@ -367,30 +390,6 @@ function compactDir(dir: WireDir): WireDir {
 /** Pane-specific CSS (theme vars come from the shared shell). */
 const FILES_CSS = `
 #rows { user-select: none; }
-/* Header row hosting the show/hide-uncommitted toggle (mirrors the Conversations pane header). */
-#files-header {
-	display: flex;
-	align-items: center;
-	padding: 2px 12px 4px 12px;
-	min-height: 22px;
-}
-#files-header:empty { display: none; }
-.toggle-btn {
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	background: transparent;
-	border: none;
-	color: var(--vscode-descriptionForeground);
-	cursor: pointer;
-	padding: 2px 4px;
-	border-radius: 4px;
-	font: inherit;
-	font-size: 0.9em;
-}
-.toggle-btn:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
-.toggle-btn svg { width: 14px; height: 14px; fill: currentColor; }
-.uc-hint { margin-left: 6px; opacity: 0.7; font-size: 0.9em; }
 .msg { padding: 6px 12px; color: var(--vscode-descriptionForeground); }
 .row {
 	display: flex;
@@ -462,7 +461,6 @@ input.chk { margin: 0 2px 0 0; }
 
 /** Pane-specific script. The shared shell has already defined `vscode`, `reportRendered`, etc. */
 const FILES_JS = `
-const filesHeader = document.getElementById('files-header');
 const rows = document.getElementById('rows');
 
 // Pixels of indent per tree depth level (matches VS Code's \`workbench.tree.indent\` default).
@@ -472,39 +470,12 @@ const INDENT_PX = 8;
 const FILE_SVG = '<svg viewBox="0 0 16 16"><path d="M9.5 1H3.5L3 1.5v13l.5.5h9l.5-.5V5.5L9.5 1zm0 1.4L11.6 4.5H9.5V2.4zM4 14V2h4.5v3.5H12V14H4z"/></svg>';
 const FOLDER_SVG = '<svg viewBox="0 0 16 16"><path d="M14.5 3H7.7l-1-1H1.5L1 2.5v11l.5.5h13l.5-.5v-10L14.5 3zM14 13H2V3h4.3l1 1H14v9z"/></svg>';
 const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
-const EYE_SVG = '<svg viewBox="0 0 16 16"><path d="M8 3C4.5 3 1.7 5.1.5 8c1.2 2.9 4 5 7.5 5s6.3-2.1 7.5-5C14.3 5.1 11.5 3 8 3zm0 8.3A3.3 3.3 0 1 1 8 4.7a3.3 3.3 0 0 1 0 6.6zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>';
-const EYE_OFF_SVG = '<svg viewBox="0 0 16 16"><path d="M13.5 2.5l-11 11 .7.7 2.2-2.2c.8.3 1.7.5 2.6.5 3.5 0 6.3-2.1 7.5-5a8.6 8.6 0 0 0-2.9-3.7l1.6-1.6-.7-.7zM8 11.3a3.3 3.3 0 0 1-2.3-5.6l1 1a2 2 0 0 0 2.6 2.6l1 1c-.6.4-1.4.6-2.3.6zM8 4.7c1.8 0 3.3 1.5 3.3 3.3 0 .5-.1.9-.3 1.3l1.5 1.5c.6-.6 1.1-1.3 1.5-2.1C12.3 5.6 10.4 4 8 4c-.6 0-1.2.1-1.8.3l1.2 1.2c.2 0 .4-.1.6-.1z"/></svg>';
 
 let expanded = new Set();      // relPaths of expanded folders
 let expandAll = false;
 let lastTree = null;           // WireDir | null | undefined(sentinel → loading)
-let hideUncommitted = false;   // host-authoritative; restored on first paint
+let hideUncommitted = false;   // host-authoritative; drives the empty-state message
 let ucHidden = 0;              // count of uncommitted leaves the host filtered out
-
-function renderHeader() {
-	filesHeader.innerHTML = '';
-	// Only offer the toggle when there is a tree to filter (avoids a lone control on an empty pane).
-	const treeEmpty = !lastTree || (lastTree.dirs.length === 0 && lastTree.files.length === 0);
-	if (lastTree === undefined || treeEmpty) { return; }
-	const btn = document.createElement('button');
-	btn.className = 'toggle-btn';
-	btn.type = 'button';
-	const glyph = hideUncommitted ? EYE_OFF_SVG : EYE_SVG;
-	const label = hideUncommitted ? 'Show uncommitted' : 'Hide uncommitted';
-	btn.innerHTML = glyph + '<span></span>';
-	btn.querySelector('span').textContent = label;
-	btn.title = label;
-	btn.addEventListener('click', () => {
-		vscode.postMessage({ type: 'toggleUncommitted' });
-	});
-	filesHeader.appendChild(btn);
-	if (hideUncommitted && ucHidden > 0) {
-		const hint = document.createElement('span');
-		hint.className = 'uc-hint';
-		hint.textContent = '(' + ucHidden + ' hidden)';
-		filesHeader.appendChild(hint);
-	}
-}
 
 // \`expandAll\` renders every folder open while \`expanded\` stays empty, so a naive toggle would leave
 // only the clicked folder in the Set and collapse everything else. Materialize the currently-visible
@@ -617,18 +588,37 @@ function renderDir(dir, depth) {
 	return frag;
 }
 
+function emptyMessage() {
+	// State-aware so a user whose tree is empty *because* uncommitted rows are hidden is told how to
+	// get them back, instead of seeing a bare "No changes to review."
+	if (hideUncommitted && ucHidden > 0) {
+		return 'No committed changes. ' + ucHidden + ' uncommitted file(s) hidden — use the eye icon in the view title bar to show them.';
+	}
+	if (hideUncommitted) {
+		return 'No changes to review. (Uncommitted changes are hidden.)';
+	}
+	return 'No changes to review.';
+}
+
+function showMessage(text) {
+	rows.innerHTML = '';
+	const div = document.createElement('div');
+	div.className = 'msg';
+	div.textContent = text;   // textContent, not innerHTML — the count must not be able to inject markup
+	rows.appendChild(div);
+}
+
 function paint() {
 	const t0 = performance.now();
-	renderHeader();
 	rows.innerHTML = '';
 	if (lastTree === undefined) {
-		rows.innerHTML = '<div class="msg">Loading changes…</div>';
+		showMessage('Loading changes…');
 		reportRendered('files', 0, t0);
 		return;
 	}
 	const treeEmpty = !lastTree || (lastTree.dirs.length === 0 && lastTree.files.length === 0);
 	if (treeEmpty) {
-		rows.innerHTML = '<div class="msg">No changes to review.</div>';
+		showMessage(emptyMessage());
 		reportRendered('files', 0, t0);
 		return;
 	}

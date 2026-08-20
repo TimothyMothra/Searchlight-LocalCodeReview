@@ -209,6 +209,16 @@
         "icon": "$(expand-all)"
       },
       {
+        "command": "searchlight.filesHideUncommitted",
+        "title": "Searchlight: Hide Uncommitted Changes",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "searchlight.filesShowUncommitted",
+        "title": "Searchlight: Show Uncommitted Changes",
+        "icon": "$(eye-closed)"
+      },
+      {
         "command": "searchlight.openCommitDiff",
         "title": "Searchlight: Open Commit Diff"
       },
@@ -326,19 +336,29 @@
           "group": "navigation@4"
         },
         {
-          "command": "searchlight.commitsViewAllChanges",
-          "when": "view == searchlight.files",
+          "command": "searchlight.filesHideUncommitted",
+          "when": "view == searchlight.files && !searchlight.filesUncommittedHidden",
           "group": "navigation@0"
         },
         {
-          "command": "searchlight.filesExpandAll",
+          "command": "searchlight.filesShowUncommitted",
+          "when": "view == searchlight.files && searchlight.filesUncommittedHidden",
+          "group": "navigation@0"
+        },
+        {
+          "command": "searchlight.commitsViewAllChanges",
           "when": "view == searchlight.files",
           "group": "navigation@1"
         },
         {
-          "command": "searchlight.refreshAll",
+          "command": "searchlight.filesExpandAll",
           "when": "view == searchlight.files",
           "group": "navigation@2"
+        },
+        {
+          "command": "searchlight.refreshAll",
+          "when": "view == searchlight.files",
+          "group": "navigation@3"
         },
         {
           "command": "searchlight.refreshAll",

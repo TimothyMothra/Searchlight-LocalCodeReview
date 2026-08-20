@@ -28,7 +28,7 @@ import {
 } from './git';
 import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
-import { FilesWebviewProvider } from './filesWebview';
+import { FilesWebviewProvider, syncUncommittedContext } from './filesWebview';
 import { CommitsWebviewProvider } from './commitsWebview';
 import { ConversationsWebviewProvider } from './conversationsWebview';
 import {
@@ -142,6 +142,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			webviewOptions: { retainContextWhenHidden: true },
 		}),
 	);
+
+	// Seed the show/hide-uncommitted context key from persisted state so the correct title-bar button
+	// (Hide vs Show) is present immediately at startup — including for a user who reloads while
+	// uncommitted rows are hidden.
+	void syncUncommittedContext(context.workspaceState);
 
 	// Re-post the Files tree when folder compaction is toggled, so flipping the setting updates the
 	// pane live instead of requiring a reload.
@@ -370,6 +375,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('searchlight.filesExpandAll', () => {
 			filesProvider.setExpanded(true);
+		}),
+		vscode.commands.registerCommand('searchlight.filesHideUncommitted', async () => {
+			await filesProvider.setHideUncommitted(true);
+		}),
+		vscode.commands.registerCommand('searchlight.filesShowUncommitted', async () => {
+			await filesProvider.setHideUncommitted(false);
 		}),
 		vscode.commands.registerCommand('searchlight.collapseAllCommits', () => {
 			// The Commits pane is a webview (Phase D); collapsing is pure UI state

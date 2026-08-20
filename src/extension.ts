@@ -30,7 +30,7 @@ import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
 import { FilesWebviewProvider, syncUncommittedContext } from './filesWebview';
 import { CommitsWebviewProvider } from './commitsWebview';
-import { ConversationsWebviewProvider } from './conversationsWebview';
+import { ConversationsWebviewProvider, syncResolvedContext } from './conversationsWebview';
 import {
 	DIFF_SCHEME,
 	ReviewDiffContentProvider,
@@ -147,6 +147,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// (Hide vs Show) is present immediately at startup — including for a user who reloads while
 	// uncommitted rows are hidden.
 	void syncUncommittedContext(context.workspaceState);
+	// Same for the Conversations show/hide-resolved buttons.
+	void syncResolvedContext(context.workspaceState);
 
 	// Re-post the Files tree when folder compaction is toggled, so flipping the setting updates the
 	// pane live instead of requiring a reload.
@@ -381,6 +383,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('searchlight.filesShowUncommitted', async () => {
 			await filesProvider.setHideUncommitted(false);
+		}),
+		vscode.commands.registerCommand('searchlight.conversationsHideResolved', async () => {
+			await conversationsProvider.setHideResolved(true);
+		}),
+		vscode.commands.registerCommand('searchlight.conversationsShowResolved', async () => {
+			await conversationsProvider.setHideResolved(false);
 		}),
 		vscode.commands.registerCommand('searchlight.collapseAllCommits', () => {
 			// The Commits pane is a webview (Phase D); collapsing is pure UI state

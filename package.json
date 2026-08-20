@@ -219,6 +219,16 @@
         "icon": "$(eye-closed)"
       },
       {
+        "command": "searchlight.conversationsHideResolved",
+        "title": "Searchlight: Hide Resolved Conversations",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "searchlight.conversationsShowResolved",
+        "title": "Searchlight: Show Resolved Conversations",
+        "icon": "$(eye-closed)"
+      },
+      {
         "command": "searchlight.openCommitDiff",
         "title": "Searchlight: Open Commit Diff"
       },
@@ -369,6 +379,16 @@
           "command": "searchlight.collapseAllCommits",
           "when": "view == searchlight.commits",
           "group": "navigation@2"
+        },
+        {
+          "command": "searchlight.conversationsHideResolved",
+          "when": "view == searchlight.conversations && !searchlight.conversationsResolvedHidden",
+          "group": "navigation@0"
+        },
+        {
+          "command": "searchlight.conversationsShowResolved",
+          "when": "view == searchlight.conversations && searchlight.conversationsResolvedHidden",
+          "group": "navigation@0"
         },
         {
           "command": "searchlight.refreshAll",

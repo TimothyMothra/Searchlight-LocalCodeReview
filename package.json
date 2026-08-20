@@ -41,25 +41,29 @@
           "id": "searchlight.comparison",
           "name": "Comparison",
           "type": "webview",
-          "icon": "media/searchlight.svg"
+          "icon": "media/searchlight.svg",
+          "initialSize": 150
         },
         {
           "id": "searchlight.files",
           "name": "Changed Files",
           "type": "webview",
-          "icon": "media/searchlight.svg"
+          "icon": "media/searchlight.svg",
+          "initialSize": 400
         },
         {
           "id": "searchlight.commits",
           "name": "Commits",
           "type": "webview",
-          "icon": "media/searchlight.svg"
+          "icon": "media/searchlight.svg",
+          "initialSize": 200
         },
         {
           "id": "searchlight.conversations",
           "name": "Conversations",
           "type": "webview",
-          "icon": "media/searchlight.svg"
+          "icon": "media/searchlight.svg",
+          "initialSize": 200
         }
       ]
     },
@@ -291,6 +295,11 @@
           "type": "boolean",
           "default": true,
           "description": "When true, comment threads are not materialized eagerly during activation; rendering is deferred until an editor becomes visible (or a short fallback delay), avoiding thread flashing and editor-tab churn on load. User actions (reply, resolve) always render immediately."
+        },
+        "searchlight.files.compactFolders": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, single-child folder chains in the Changed Files pane are compacted onto one row (e.g. 'Service/StoreService.Runner/Commands'), mirroring VS Code's explorer.compactFolders. Changes apply immediately — no reload needed."
         }
       }
     },

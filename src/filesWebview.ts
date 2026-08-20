@@ -214,6 +214,12 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		// documented consequence of the locked precedence order (untracked > unstaged > staged > committed).
 		const visible = hideUncommitted ? merged.filter((f) => !f.uncommitted) : merged;
 		const tree = this.buildTree(visible);
+		// Explorer-style folder compaction (`a/b/c` on one row) is opt-out via settings so the user can
+		// flip it without a rebuild. Runs AFTER buildTree/sortLevel so the client stays dumb — it just
+		// renders whatever tree it is handed.
+		if (vscode.workspace.getConfiguration('searchlight').get<boolean>('files.compactFolders', true)) {
+			compactTree(tree);
+		}
 		// count = merged visible leaves (respects the hide filter) — the whole tree is built at once.
 		const count = visible.length;
 		logBuild('files', tBuild, count, tree);
@@ -326,6 +332,38 @@ function mergeFiles(committed: ChangedFile[], uc: UncommittedChanges, reviewedFi
 	return [...map.values()];
 }
 
+/**
+ * Collapse single-child folder chains into one row, mirroring VS Code's `explorer.compactFolders`
+ * (`Service/StoreService.Runner/Commands` renders as a single node instead of three).
+ *
+ * The root node is deliberately NOT compacted: it has `name: ''` and is a container the client never
+ * renders as a row, so merging into it would produce a leading-slash label. Compaction is applied to
+ * each of root's children instead.
+ *
+ * The merged node keeps the DEEPEST node's `relPath` because that value is the expand/collapse key the
+ * client stores in its `expanded` Set — using an ancestor's path would key the row on a folder that is
+ * no longer rendered.
+ */
+function compactTree(root: WireDir): void {
+	root.dirs = root.dirs.map(compactDir);
+}
+
+/** Merge `dir` with its lone subdirectory for as long as it has exactly 1 dir and 0 files. */
+function compactDir(dir: WireDir): WireDir {
+	let node = dir;
+	while (node.dirs.length === 1 && node.files.length === 0) {
+		const child = node.dirs[0];
+		node = {
+			name: `${node.name}/${child.name}`,
+			relPath: child.relPath,
+			dirs: child.dirs,
+			files: child.files,
+		};
+	}
+	node.dirs = node.dirs.map(compactDir);
+	return node;
+}
+
 /** Pane-specific CSS (theme vars come from the shared shell). */
 const FILES_CSS = `
 #rows { user-select: none; }
@@ -415,6 +453,8 @@ const FILES_CSS = `
 .file.st-C .label, .file.st-C .status, .file.st-C .uc-marker { color: var(--vscode-gitDecoration-renamedResourceForeground); }
 .file.st-U .label, .file.st-U .status, .file.st-U .uc-marker { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
 .file.st-T .label, .file.st-T .status, .file.st-T .uc-marker { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+/* Depth indent lives on .row (inline padding-left), NOT here — keeping it out of .children
+   means the hover/selection background still spans the full pane width, matching VS Code. */
 .children { display: block; }
 .dir.collapsed > .children { display: none; }
 input.chk { margin: 0 2px 0 0; }
@@ -424,6 +464,9 @@ input.chk { margin: 0 2px 0 0; }
 const FILES_JS = `
 const filesHeader = document.getElementById('files-header');
 const rows = document.getElementById('rows');
+
+// Pixels of indent per tree depth level (matches VS Code's \`workbench.tree.indent\` default).
+const INDENT_PX = 8;
 
 // Inline SVG glyphs (currentColor) — codicons aren't bundled, so no font is loaded.
 const FILE_SVG = '<svg viewBox="0 0 16 16"><path d="M9.5 1H3.5L3 1.5v13l.5.5h9l.5-.5V5.5L9.5 1zm0 1.4L11.6 4.5H9.5V2.4zM4 14V2h4.5v3.5H12V14H4z"/></svg>';
@@ -463,7 +506,21 @@ function renderHeader() {
 	}
 }
 
-function renderDir(dir) {
+// \`expandAll\` renders every folder open while \`expanded\` stays empty, so a naive toggle would leave
+// only the clicked folder in the Set and collapse everything else. Materialize the currently-visible
+// expansion into \`expanded\` first, then toggle just the clicked folder.
+function collectDirPaths(dir, out) {
+	if (!dir) { return; }
+	for (const d of dir.dirs) { out.add(d.relPath); collectDirPaths(d, out); }
+}
+
+function materializeExpansion() {
+	if (!expandAll) { return; }
+	collectDirPaths(lastTree, expanded);
+	expandAll = false;
+}
+
+function renderDir(dir, depth) {
 	const frag = document.createDocumentFragment();
 	for (const d of dir.dirs) {
 		const open = expandAll || expanded.has(d.relPath);
@@ -471,27 +528,29 @@ function renderDir(dir) {
 		el.className = 'dir' + (open ? '' : ' collapsed');
 		const row = document.createElement('div');
 		row.className = 'row';
+		row.style.paddingLeft = (depth * INDENT_PX) + 'px';
 		row.innerHTML =
 			'<span class="twisty">' + CHEVRON_SVG + '</span>' +
 			'<span class="glyph">' + FOLDER_SVG + '</span>' +
 			'<span class="label"></span>';
 		row.querySelector('.label').textContent = d.name;
 		row.addEventListener('click', () => {
+			materializeExpansion();
 			if (expanded.has(d.relPath)) { expanded.delete(d.relPath); }
 			else { expanded.add(d.relPath); }
-			expandAll = false;
 			paint();
 		});
 		el.appendChild(row);
 		const kids = document.createElement('div');
 		kids.className = 'children';
-		kids.appendChild(renderDir(d));
+		kids.appendChild(renderDir(d, depth + 1));
 		el.appendChild(kids);
 		frag.appendChild(el);
 	}
 	for (const f of dir.files) {
 		const row = document.createElement('div');
 		row.className = 'row file' + (f.status ? ' st-' + f.status : '') + (f.uncommitted ? ' uncommitted' : '');
+		row.style.paddingLeft = (depth * INDENT_PX) + 'px';
 		const twisty = document.createElement('span');
 		twisty.className = 'twisty spacer';
 		if (f.uncommitted) {
@@ -573,7 +632,7 @@ function paint() {
 		reportRendered('files', 0, t0);
 		return;
 	}
-	rows.appendChild(renderDir(lastTree));
+	rows.appendChild(renderDir(lastTree, 0));
 	// Host already filtered hidden uncommitted leaves, so the tree = the visible leaf set.
 	reportRendered('files', countFiles(lastTree), t0);
 }

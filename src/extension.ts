@@ -143,6 +143,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 	);
 
+	// Re-post the Files tree when folder compaction is toggled, so flipping the setting updates the
+	// pane live instead of requiring a reload.
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration((e) => {
+			if (e.affectsConfiguration('searchlight.files.compactFolders')) {
+				filesProvider.refresh();
+			}
+		}),
+	);
+
 	// Refresh all four views + inline comments + status bar together.
 	const refreshAll = () => {
 		comparisonProvider.refresh();

@@ -261,7 +261,10 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
     left: 0; right: 0;
     z-index: 10;
     margin-top: 2px;
-    max-height: 220px;
+    /* Cap to the pane height so a short Comparison pane (initialSize 150px) doesn't clip the list.
+       vh resolves against the webview's own viewport (the pane), not the .field offset parent,
+       so this tracks the actual pane height; 96px reserves the field rows above the dropdown. */
+    max-height: min(220px, calc(100vh - 96px));
     overflow-y: auto;
     background: var(--vscode-dropdown-background, var(--vscode-input-background));
     border: 1px solid var(--vscode-focusBorder);

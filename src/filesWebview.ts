@@ -19,12 +19,14 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ActiveComparison } from './activeComparison';
 import { ReviewStatusBar } from './statusBar';
 import * as store from './reviewStore';
 import { webviewHtml, getNonce } from './webviewShell';
 import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
 import { ChangedFile, UncommittedChanges, changedFilesUncommitted } from './git';
+import { DIFF_SCHEME } from './reviewDiff';
 
 /** A folder node in the serializable tree sent to the webview. */
 interface WireDir {
@@ -95,6 +97,9 @@ export async function syncUncommittedContext(workspaceState: vscode.Memento): Pr
 export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 	private filesExpanded = false;
+
+	/** relPath of the row mirroring the active editor (auto-reveal). Undefined = nothing revealed. */
+	private revealPath?: string;
 
 	// Mirror of filesView.ts loading state so we show "Loading changes…" once per comparison key.
 	private paths: ChangedFile[] = [];
@@ -191,6 +196,60 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		void this.statusBar.update();
 	}
 
+	/**
+	 * Auto-reveal (mirrors VS Code's `explorer.autoReveal`): highlight the row matching the active
+	 * editor, expanding its ancestors and scrolling it into view.
+	 *
+	 * This is a REVEAL ONLY — it never opens, closes, or re-opens an editor. Clicking a row opens a
+	 * diff, which fires `onDidChangeActiveTextEditor` and lands back here; the `=== this.revealPath`
+	 * guard below makes that settle in one pass rather than looping.
+	 *
+	 * An `undefined` editor is deliberately ignored rather than clearing the highlight: focusing the
+	 * Files pane (or any webview) fires `undefined`, and clearing there would drop the highlight at
+	 * exactly the moment the user looks at the tree.
+	 */
+	revealForUri(uri: vscode.Uri | undefined): void {
+		if (!uri || !this.view) {
+			return;
+		}
+		if (!vscode.workspace.getConfiguration('searchlight').get<boolean>('files.autoReveal', true)) {
+			return;
+		}
+		const relPath = this.toRelPath(uri);
+		if (!relPath || relPath === this.revealPath) {
+			return;
+		}
+		this.revealPath = relPath;
+		// Post only the reveal — a full postState() would rebuild the whole tree on every tab switch.
+		this.view.webview.postMessage({ type: 'reveal', relPath });
+	}
+
+	/**
+	 * Map an active editor's uri back to a repo-relative path, or undefined when it isn't a file in
+	 * this repo. A diff editor's active text editor is one SIDE of the diff, so both the historical
+	 * `searchlight-diff` side and the working-tree `file` side occur.
+	 */
+	private toRelPath(uri: vscode.Uri): string | undefined {
+		if (uri.scheme === DIFF_SCHEME) {
+			// diffUri() builds `path` as '/' + relPath, already forward-slashed.
+			return uri.path.replace(/^\//, '') || undefined;
+		}
+		if (uri.scheme === 'file') {
+			const cwd = this.getActive()?.repoRootFsPath;
+			if (!cwd) {
+				return undefined;
+			}
+			const rel = path.relative(cwd, uri.fsPath).replace(/\\/g, '/');
+			// '..' or an absolute result means the file lives outside the repo — ignore it.
+			if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+				return undefined;
+			}
+			return rel;
+		}
+		// Any other scheme (output, settings, webview, git:, …) is not a changed-file row.
+		return undefined;
+	}
+
 	/** Build the current tree and push it to the webview (mirrors filesView.ts getChildren). */
 	private async postState(): Promise<void> {
 		if (!this.view) {
@@ -199,7 +258,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		const hideUncommitted = isUncommittedHidden(this.workspaceState);
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare) {
-			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0 });
+			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath });
 			return;
 		}
 
@@ -221,7 +280,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 						this.loadingKey = undefined;
 					});
 			}
-			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0 });
+			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath });
 			return;
 		}
 
@@ -247,7 +306,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		const count = visible.length;
 		logBuild('files', tBuild, count, tree);
 		const ucHidden = hideUncommitted ? ucTotal : 0;
-		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden });
+		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden, revealPath: this.revealPath });
 	}
 
 	/**
@@ -405,6 +464,10 @@ const FILES_CSS = `
 	white-space: nowrap;
 	line-height: 22px;
 }
+/* Auto-reveal highlight for the row mirroring the active editor. Declared BEFORE :hover so hover
+   still visibly wins when the mouse is over a different row. */
+.row.revealed { background: var(--vscode-list-inactiveSelectionBackground); }
+.row.revealed .label { color: var(--vscode-list-inactiveSelectionForeground, inherit); }
 .row:hover { background: var(--vscode-list-hoverBackground); }
 .twisty {
 	width: 16px;
@@ -481,6 +544,8 @@ let expandAll = false;
 let lastTree = null;           // WireDir | null | undefined(sentinel → loading)
 let hideUncommitted = false;   // host-authoritative; drives the empty-state message
 let ucHidden = 0;              // count of uncommitted leaves the host filtered out
+let revealPath = null;         // relPath of the row mirroring the active editor (auto-reveal)
+let revealedEl = null;         // the rendered .row for revealPath, so paint() can scroll to it
 
 // \`expandAll\` renders every folder open while \`expanded\` stays empty, so a naive toggle would leave
 // only the clicked folder in the Set and collapse everything else. Materialize the currently-visible
@@ -494,6 +559,33 @@ function materializeExpansion() {
 	if (!expandAll) { return; }
 	collectDirPaths(lastTree, expanded);
 	expandAll = false;
+}
+
+// Folder compaction means a leaf at 'a/b/c/file.ts' can sit under ONE rendered node whose relPath is
+// 'a/b/c'. Splitting the path would yield keys ('a', 'a/b') that no rendered node uses, so walk the
+// actual tree instead and collect the relPath of every directory node on the way to the leaf.
+function findAncestors(dir, target, trail) {
+	for (const f of dir.files) { if (f.relPath === target) { return trail.slice(); } }
+	for (const d of dir.dirs) {
+		trail.push(d.relPath);
+		const hit = findAncestors(d, target, trail);
+		if (hit) { return hit; }
+		trail.pop();
+	}
+	return null;
+}
+
+// Expand every folder between the root and the revealed leaf. Returns false when the leaf is not in
+// the tree (e.g. the active editor isn't a changed file) — the caller then renders no highlight.
+function expandToReveal() {
+	if (!revealPath || !lastTree) { return false; }
+	const ancestors = findAncestors(lastTree, revealPath, []);
+	if (!ancestors) { return false; }
+	// MUST run first: with expandAll on, the expanded Set is empty, so adding only these ancestors
+	// would collapse every other folder (the bug fixed in 82c46a5).
+	materializeExpansion();
+	for (const p of ancestors) { expanded.add(p); }
+	return true;
 }
 
 function renderDir(dir, depth) {
@@ -525,8 +617,9 @@ function renderDir(dir, depth) {
 	}
 	for (const f of dir.files) {
 		const row = document.createElement('div');
-		row.className = 'row file' + (f.status ? ' st-' + f.status : '') + (f.uncommitted ? ' uncommitted' : '');
+		row.className = 'row file' + (f.status ? ' st-' + f.status : '') + (f.uncommitted ? ' uncommitted' : '') + (f.relPath === revealPath ? ' revealed' : '');
 		row.style.paddingLeft = (depth * INDENT_PX) + 'px';
+		if (f.relPath === revealPath) { revealedEl = row; }
 		const twisty = document.createElement('span');
 		twisty.className = 'twisty spacer';
 		if (f.uncommitted) {
@@ -627,6 +720,7 @@ function showMessage(text) {
 function paint() {
 	const t0 = performance.now();
 	rows.innerHTML = '';
+	revealedEl = null;
 	if (lastTree === undefined) {
 		showMessage('Loading changes…');
 		reportRendered('files', 0, t0);
@@ -639,6 +733,9 @@ function paint() {
 		return;
 	}
 	rows.appendChild(renderDir(lastTree, 0));
+	// Bring the auto-revealed row into view. 'nearest' scrolls the minimum amount, so a row already
+	// visible doesn't jump. This only scrolls the pane — it never focuses or opens anything.
+	if (revealedEl) { revealedEl.scrollIntoView({ block: 'nearest' }); }
 	// Host already filtered hidden uncommitted leaves, so the tree = the visible leaf set.
 	reportRendered('files', countFiles(lastTree), t0);
 }
@@ -661,7 +758,14 @@ window.addEventListener('message', (e) => {
 		if (typeof m.hideUncommitted === 'boolean') { hideUncommitted = m.hideUncommitted; }
 		ucHidden = typeof m.ucHidden === 'number' ? m.ucHidden : 0;
 		if (typeof m.expanded === 'boolean') { expandAll = m.expanded; }
+		// Adopt the host's reveal target so the highlight survives a full refresh.
+		revealPath = typeof m.revealPath === 'string' ? m.revealPath : null;
+		expandToReveal();
 		paint();
+	} else if (m.type === 'reveal') {
+		revealPath = m.relPath || null;
+		expandToReveal();
+		paint();   // paint() scrolls the revealed row into view
 	} else if (m.type === 'setExpanded') {
 		expandAll = !!m.value;
 		if (!m.value) { expanded.clear(); }

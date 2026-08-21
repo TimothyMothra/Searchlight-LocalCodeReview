@@ -515,6 +515,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (repoSub) {
 			context.subscriptions.push(repoSub);
 		}
+
+		// Auto-reveal: track the active editor in the Changed Files tree. Reveal-only — it never opens
+		// or closes an editor, so it cannot fight the user's tab focus.
+		context.subscriptions.push(
+			vscode.window.onDidChangeActiveTextEditor((ed) => filesProvider.revealForUri(ed?.document.uri)),
+		);
+		// Reveal whatever is already open, so a file open at activation doesn't wait for a tab switch.
+		filesProvider.revealForUri(vscode.window.activeTextEditor?.document.uri);
 		// Best-effort fallback for when the git API is unavailable. Rooted at the repo so it also
 		// works for a worktree (whose `.git` is a FILE pointing at the real gitdir); a worktree's HEAD
 		// still lives at `<worktree>/.git/HEAD` only when `.git` is a directory, so this is a

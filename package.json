@@ -320,6 +320,11 @@
           "type": "boolean",
           "default": true,
           "description": "When true, single-child folder chains in the Changed Files pane are compacted onto one row (e.g. 'Service/StoreService.Runner/Commands'), mirroring VS Code's explorer.compactFolders. Changes apply immediately — no reload needed."
+        },
+        "searchlight.files.autoReveal": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, the Changed Files pane highlights the row matching the active editor, expanding its folders and scrolling it into view, mirroring VS Code's explorer.autoReveal. Revealing never opens or closes an editor."
         }
       }
     },

@@ -37,6 +37,13 @@ export class ActiveComparison {
 	/** The active in-memory review (loaded from disk or freshly built, not yet persisted). */
 	review?: Review;
 
+	/**
+	 * True once the user explicitly chose a compare branch (setCompare/swap). While false, `resolve()`
+	 * auto-follows the checked-out HEAD so a `git checkout` updates the pane; once true, the explicit
+	 * choice is preserved until the next explicit change.
+	 */
+	private compareExplicit = false;
+
 	/** Memoized changedFiles/logRange results, keyed by the resolved commit pair. */
 	private changedFilesKey?: string;
 	private changedFilesValue: ChangedFile[] = [];
@@ -96,9 +103,22 @@ export class ActiveComparison {
 	 * yet written to disk).
 	 */
 	async resolve(): Promise<void> {
-		// getHead and the two resolveCommit calls are independent — overlap them.
-		const [head, baseCommit, compareCommit] = await Promise.all([
-			getHead(this.repoRootFsPath),
+		// HEAD must be resolved BEFORE the commits: auto-follow below can change `compare`, and
+		// resolving `compareCommit` from a stale branch name would show the new branch with the old
+		// commit. Base/compare commit resolution stays parallel with each other.
+		const head = await getHead(this.repoRootFsPath);
+		this.headBranch = head.detached ? undefined : head.branch;
+		this.headCommit = head.commit;
+
+		// Auto-follow the checked-out branch: when the user has NOT explicitly picked a compare
+		// branch, `compare` tracks HEAD so a `git checkout` is reflected instead of leaving a stale
+		// branch shown. An explicit setCompare/swap opts out until the next explicit change.
+		// Skipped while detached so a transient detach doesn't clobber a branch name with a short sha.
+		if (!this.compareExplicit && !head.detached && this.headBranch && this.compare !== this.headBranch) {
+			this.compare = this.headBranch;
+		}
+
+		const [baseCommit, compareCommit] = await Promise.all([
 			this.base
 				? resolveCommit(this.repoRootFsPath, this.base)
 				: Promise.resolve<string | undefined>(undefined),
@@ -106,8 +126,6 @@ export class ActiveComparison {
 				? resolveCommit(this.repoRootFsPath, this.compare)
 				: Promise.resolve<string | undefined>(undefined),
 		]);
-		this.headBranch = head.detached ? undefined : head.branch;
-		this.headCommit = head.commit;
 		this.baseCommit = baseCommit;
 		this.compareCommit = compareCommit;
 
@@ -172,6 +190,7 @@ export class ActiveComparison {
 	/** Set the compare (source) branch and re-resolve. */
 	async setCompare(compare: string): Promise<void> {
 		this.compare = compare;
+		this.compareExplicit = true;   // opt out of auto-follow — the user chose this branch
 		await this.resolve();
 	}
 
@@ -180,6 +199,7 @@ export class ActiveComparison {
 		const oldBase = this.base;
 		this.base = this.compare;
 		this.compare = oldBase;
+		this.compareExplicit = true;   // opt out of auto-follow — the user chose this branch
 		await this.resolve();
 	}
 

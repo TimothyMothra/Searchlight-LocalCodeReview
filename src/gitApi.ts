@@ -41,6 +41,8 @@ interface ApiHead {
 interface ApiRepoState {
 	readonly HEAD?: ApiHead;
 	readonly refs: ApiRef[];
+	/** Fires whenever the repository's state changes (HEAD, refs, working tree, …). */
+	readonly onDidChange: vscode.Event<void>;
 }
 
 interface ApiRepository {
@@ -53,6 +55,8 @@ interface ApiRepository {
 interface GitAPI {
 	readonly repositories: ApiRepository[];
 	getRepository(uri: vscode.Uri): ApiRepository | null;
+	/** Fires when a repository is opened after the API was first resolved. */
+	readonly onDidOpenRepository: vscode.Event<ApiRepository>;
 }
 
 interface GitExtensionExports {
@@ -104,10 +108,84 @@ export function getGitApi(): Promise<GitAPI | undefined> {
 	return cachedApi;
 }
 
-/** Pick the repository that owns `cwd`, falling back to the first known repository. */
+/**
+ * Pick the repository that owns `cwd`.
+ *
+ * Returns `undefined` rather than guessing when the lookup misses. The previous
+ * `?? api.repositories[0]` fallback silently reported an unrelated repository's HEAD as the user's
+ * current branch — a live failure mode with several worktrees of the same repo (plus other repos)
+ * open at once. Every caller has a `cwd`-keyed git-CLI fallback, which is correct per-worktree, so
+ * "no repo" is strictly better than "the wrong repo".
+ */
 function pickRepo(api: GitAPI, cwd: string): ApiRepository | undefined {
 	const repo = api.getRepository(vscode.Uri.file(cwd));
-	return repo ?? api.repositories[0];
+	if (repo) {
+		return repo;
+	}
+	// Exact rootUri match (or a path inside it) only — never an arbitrary repository.
+	const target = vscode.Uri.file(cwd).fsPath.replace(/\\/g, '/').toLowerCase();
+	return api.repositories.find((r) => {
+		const root = r.rootUri?.fsPath?.replace(/\\/g, '/').toLowerCase();
+		return root !== undefined && (target === root || target.startsWith(root + '/'));
+	});
+}
+
+/**
+ * Subscribe to git repository state changes (branch switch, commit, index/worktree edits) for the
+ * repo owning `cwd`. Without this nothing observes a `git checkout`, so the panes keep showing the
+ * branch that was current at activation.
+ *
+ * Returns `undefined` when the git API or the repo is unavailable — callers should fall back to a
+ * `.git/HEAD` file watcher. Also watches `onDidOpenRepository` so a repo opened *after* activation
+ * still gets wired up; the returned disposable tears down both subscriptions.
+ */
+export async function onRepoStateChanged(
+	cwd: string,
+	handler: () => void,
+): Promise<vscode.Disposable | undefined> {
+	const api = await getGitApi();
+	if (!api) {
+		return undefined;
+	}
+	const subs: vscode.Disposable[] = [];
+	let bound: ApiRepository | undefined;
+
+	const bind = (repo: ApiRepository): void => {
+		if (bound === repo) {
+			return;
+		}
+		bound = repo;
+		subs.push(repo.state.onDidChange(handler));
+	};
+
+	const existing = pickRepo(api, cwd);
+	if (existing) {
+		bind(existing);
+	}
+	// A repo can be discovered after activation (slow git ext, folder added later). Re-check on open
+	// so the subscription is not permanently lost in that race.
+	try {
+		subs.push(
+			api.onDidOpenRepository(() => {
+				const repo = pickRepo(api, cwd);
+				if (repo) {
+					bind(repo);
+					handler();
+				}
+			}),
+		);
+	} catch {
+		// onDidOpenRepository missing on this host — the initial binding above is still in effect.
+	}
+
+	if (subs.length === 0) {
+		return undefined;
+	}
+	return new vscode.Disposable(() => {
+		for (const s of subs) {
+			s.dispose();
+		}
+	});
 }
 
 /** Whether any git repository is known for `cwd` (API first, then CLI toplevel probe). */
@@ -149,12 +227,15 @@ export async function listBranches(cwd: string): Promise<BranchRef[]> {
 export async function getHead(cwd: string): Promise<HeadInfo> {
 	const api = await getGitApi();
 	const repo = api ? pickRepo(api, cwd) : undefined;
-	if (repo) {
-		const head = repo.state.HEAD;
+	const head = repo?.state.HEAD;
+	// Only trust the API when it actually has HEAD populated. A repo can be known but still
+	// initializing, in which case `state.HEAD` is undefined and reporting "no branch" would be wrong
+	// — fall through to the CLI instead.
+	if (head) {
 		return {
-			branch: head?.name,
-			commit: head?.commit,
-			detached: !!head && !head.name,
+			branch: head.name,
+			commit: head.commit,
+			detached: !head.name,
 		};
 	}
 	// CLI fallback: rev-parse abbrev; 'HEAD' means detached.

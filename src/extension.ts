@@ -482,6 +482,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		await active.resolve();
 		perf('resolve', tResolve);
 		refreshAll();
+
+		// Watch for branch switches. Nothing else observes `git checkout`, so without this the panes
+		// keep showing whatever branch was current at activation. Debounced because git fires several
+		// state events per checkout; `inFlight` prevents the handler re-entering itself (resolve() can
+		// mutate `compare` via auto-follow, but that is idempotent and refreshAll() only posts webview
+		// state — neither touches git, so this cannot loop).
+		let headTimer: NodeJS.Timeout | undefined;
+		let inFlight = false;
+		const onHeadChanged = (): void => {
+			if (headTimer) {
+				clearTimeout(headTimer);
+			}
+			headTimer = setTimeout(() => {
+				headTimer = undefined;
+				if (inFlight) {
+					return;
+				}
+				inFlight = true;
+				void (async () => {
+					try {
+						await active.resolve();
+						refreshAll();
+					} finally {
+						inFlight = false;
+					}
+				})();
+			}, 250);
+		};
+
+		const repoSub = await gitApi.onRepoStateChanged(repoRoot, onHeadChanged);
+		if (repoSub) {
+			context.subscriptions.push(repoSub);
+		}
+		// Best-effort fallback for when the git API is unavailable. Rooted at the repo so it also
+		// works for a worktree (whose `.git` is a FILE pointing at the real gitdir); a worktree's HEAD
+		// still lives at `<worktree>/.git/HEAD` only when `.git` is a directory, so this is a
+		// supplement to — not a replacement for — the API subscription above.
+		const headWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(vscode.Uri.file(repoRoot), '.git/HEAD'),
+		);
+		headWatcher.onDidChange(onHeadChanged);
+		headWatcher.onDidCreate(onHeadChanged);
+		context.subscriptions.push(headWatcher);
+
 		perf('background init total', tBg);
 	})();
 }

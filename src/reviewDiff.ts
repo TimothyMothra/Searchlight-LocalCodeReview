@@ -140,6 +140,31 @@ function compareIsHead(active: ActiveComparison): boolean {
 }
 
 /**
+ * Open the CUMULATIVE diff for one file: merge-base content (left, read-only) ↔ the live working
+ * file (right). One diff covering the branch's committed changes AND any further working-tree edits,
+ * which is the whole point of the cumulative view — a file changed in a commit and then edited again
+ * shows as a single combined change instead of only its uncommitted slice.
+ *
+ * The right side is the real `file://` URI (not a snapshot) so the comment controller — which only
+ * attaches threads to real file URIs — keeps working, exactly as in `openUncommittedFileDiff`.
+ *
+ * A file that does not exist at the merge-base makes the content provider return '' (all-added); a
+ * file deleted in the working tree gives a right side that doesn't exist and renders empty. Both are
+ * honest and match the existing empty-side handling, so neither is special-cased.
+ */
+export async function openCumulativeFileDiff(active: ActiveComparison, relPath: string): Promise<void> {
+	const cwd = active.repoRootFsPath;
+	const mergeBaseSha = active.mergeBaseCommit;
+	if (!cwd || !relPath || !mergeBaseSha) {
+		return;
+	}
+	const leftUri = diffUri(relPath, mergeBaseSha, cwd);
+	const rightUri = vscode.Uri.file(path.join(cwd, relPath));
+	const title = `${relPath} (${short(active.base ?? mergeBaseSha)} \u2194 working, cumulative)`;
+	await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title, { preview: false });
+}
+
+/**
  * Open a multi-file diff (VS Code's `vscode.changes`) of ALL changed files in the active
  * comparison: base content (left) ↔ compare content (right). When compare is the checked-out HEAD
  * the right side is the working-tree file so edits/comments stay live.

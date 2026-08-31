@@ -194,6 +194,10 @@
         "title": "Searchlight: Open File Diff"
       },
       {
+        "command": "searchlight.openCumulativeFileDiff",
+        "title": "Searchlight: Open Cumulative File Diff"
+      },
+      {
         "command": "searchlight.copyCommitSha",
         "title": "Searchlight: Copy Commit SHA",
         "icon": "$(copy)"
@@ -325,6 +329,11 @@
           "type": "boolean",
           "default": true,
           "description": "When true, the Changed Files pane highlights the row matching the active editor, expanding its folders and scrolling it into view, mirroring VS Code's explorer.autoReveal. Revealing never opens or closes an editor."
+        },
+        "searchlight.files.cumulativeDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, the Changed Files pane shows all committed AND uncommitted changes on the branch versus its merge-base with the base branch, as a single diff per file. Turn off to view committed and uncommitted changes separately. Only applies when the compare branch is the checked-out branch. Changes apply immediately — no reload needed."
         }
       }
     },
@@ -464,6 +473,10 @@
         },
         {
           "command": "searchlight.openFileDiff",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.openCumulativeFileDiff",
           "when": "false"
         },
         {

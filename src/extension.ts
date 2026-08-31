@@ -39,6 +39,7 @@ import {
 	openCommitDiff,
 	openCommitFileDiff,
 	openUncommittedFileDiff,
+	openCumulativeFileDiff,
 	UncommittedGroup,
 } from './reviewDiff';
 import { initPerf, perf, perfLine } from './perf';
@@ -154,7 +155,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// pane live instead of requiring a reload.
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration((e) => {
-			if (e.affectsConfiguration('searchlight.files.compactFolders')) {
+			if (e.affectsConfiguration('searchlight.files.compactFolders') || e.affectsConfiguration('searchlight.files.cumulativeDiff')) {
 				filesProvider.refresh();
 			}
 		}),
@@ -410,6 +411,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await openUncommittedFileDiff(active, relPath, group);
 			},
 		),
+		vscode.commands.registerCommand('searchlight.openCumulativeFileDiff', async (relPath: string) => {
+			await openCumulativeFileDiff(active, relPath);
+		}),
 		vscode.commands.registerCommand('searchlight.openCommitDiff', async (sha: string) => {
 			await openCommitDiff(active, sha);
 		}),

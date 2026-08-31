@@ -9,7 +9,7 @@
 
 import * as vscode from 'vscode';
 import { getHead } from './gitApi';
-import { changedFiles, ChangedFile, CommitEntry, defaultBaseBranch, logRange, resolveCommit } from './git';
+import { changedFiles, changedFilesCumulative, ChangedFile, CommitEntry, defaultBaseBranch, logRange, mergeBase, resolveCommit } from './git';
 import { computeReviewPaths, emptyReview, loadReview } from './reviewStore';
 import { Review } from './reviewModel';
 import { perfCount } from './perf';
@@ -24,6 +24,11 @@ export class ActiveComparison {
 	baseCommit?: string;
 	/** Full sha `compare` resolves to. */
 	compareCommit?: string;
+	/**
+	 * Merge-base of `base` and `compare` — where the branch diverged. Left side of the cumulative
+	 * diff. Undefined when it can't be computed (unrelated histories, unresolved refs).
+	 */
+	mergeBaseCommit?: string;
 
 	/** Current HEAD branch of the repo (undefined when detached). */
 	headBranch?: string;
@@ -128,6 +133,12 @@ export class ActiveComparison {
 		]);
 		this.baseCommit = baseCommit;
 		this.compareCommit = compareCommit;
+		// Divergence point for the cumulative (merge-base → working tree) diff. Needs both refs, so it
+		// runs after they resolve; undefined when unavailable, which disables cumulative mode.
+		this.mergeBaseCommit =
+			this.base && this.compare
+				? await mergeBase(this.repoRootFsPath, this.base, this.compare)
+				: undefined;
 
 		if (!this.base || !this.compare) {
 			this.reviewDir = '';
@@ -226,6 +237,26 @@ export class ActiveComparison {
 		this.changedFilesKey = key;
 		perfCount('files.data-load', t, this.changedFilesValue.length);
 		return this.changedFilesValue;
+	}
+
+	/**
+	 * CUMULATIVE changed files: committed-on-branch + staged + unstaged in one diff per file
+	 * (merge-base → working tree). Deliberately NOT memoized: unlike `getChangedFiles()`, this result
+	 * changes whenever the working tree changes, with no commit sha moving, so the `pairKey` memo
+	 * would serve a stale list forever. One extra `git diff --name-status` per render matches what
+	 * `changedFilesUncommitted()` already costs.
+	 *
+	 * Returns `[]` when there is no merge-base (unrelated histories) — the caller then falls back to
+	 * the non-cumulative path.
+	 */
+	async getChangedFilesCumulative(): Promise<ChangedFile[]> {
+		if (!this.mergeBaseCommit) {
+			return [];
+		}
+		const t = Date.now();
+		const files = await changedFilesCumulative(this.repoRootFsPath, this.mergeBaseCommit);
+		perfCount('files.data-load-cumulative', t, files.length);
+		return files;
 	}
 
 	/** Commits in base..compare, memoized by the resolved commit pair (see getChangedFiles). */

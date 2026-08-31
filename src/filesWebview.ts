@@ -69,6 +69,7 @@ type IncomingMessage =
 	| { type: 'toggleReviewed'; relPath: string }
 	| { type: 'openFile'; relPath: string }
 	| { type: 'openUncommitted'; relPath: string; group: UncommittedGroup }
+	| { type: 'openCumulative'; relPath: string }
 	| { type: 'rendered'; view: string; ms: number; count: number };
 
 /** workspaceState key persisting the show/hide-uncommitted toggle across reloads (default false = shown). */
@@ -139,6 +140,14 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 							'searchlight.openUncommittedFileDiff',
 							msg.relPath,
 							msg.group,
+						);
+					}
+					break;
+				case 'openCumulative':
+					if (msg.relPath) {
+						await vscode.commands.executeCommand(
+							'searchlight.openCumulativeFileDiff',
+							msg.relPath,
 						);
 					}
 					break;
@@ -258,12 +267,55 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		const hideUncommitted = isUncommittedHidden(this.workspaceState);
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare) {
-			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath });
+			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
 			return;
 		}
 
 		// Same inline key form filesView.ts uses (ActiveComparison.pairKey is private).
 		const key = `${active.baseCommit ?? active.base}...${active.compareCommit ?? active.compare}`;
+
+		// CUMULATIVE mode: one diff per file covering committed-on-branch + staged + unstaged
+		// (merge-base → working tree). Only valid when `compare` IS the checked-out HEAD — the working
+		// tree belongs to the checked-out branch, so diffing it against an explicitly-picked other
+		// branch would be meaningless. Falls back to the split view when off, when an explicit compare
+		// branch is selected, or when there is no merge-base.
+		if (
+			vscode.workspace.getConfiguration('searchlight').get<boolean>('files.cumulativeDiff', true) &&
+			active.compareIsHead &&
+			active.mergeBaseCommit
+		) {
+			// Both are live working-tree state, so both are fetched fresh every render (no memo — see
+			// getChangedFilesCumulative). NOTE: a file added in a branch commit and then deleted in the
+			// working tree correctly disappears from this list — that is the point of the cumulative
+			// view (net effect vs the merge-base), not a bug.
+			const [cum, uc] = await Promise.all([
+				active.getChangedFilesCumulative(),
+				this.loadUncommitted(active),
+			]);
+			const tBuildCum = Date.now();
+			const rows = cumulativeFiles(cum, uc, active.review?.reviewedFiles ?? []);
+			const ucTotalCum = rows.reduce((n, f) => (f.uncommitted ? n + 1 : n), 0);
+			// In cumulative mode a row is one merged diff, so "uncommitted" is no longer a row KIND —
+			// it means "this file also has working-tree changes". Hiding therefore drops files with
+			// uncommitted work, leaving only those whose branch changes are fully committed.
+			const visibleCum = hideUncommitted ? rows.filter((f) => !f.uncommitted) : rows;
+			const treeCum = this.buildTree(visibleCum);
+			if (vscode.workspace.getConfiguration('searchlight').get<boolean>('files.compactFolders', true)) {
+				compactTree(treeCum);
+			}
+			logBuild('files', tBuildCum, visibleCum.length, treeCum);
+			this.view.webview.postMessage({
+				type: 'state',
+				tree: treeCum,
+				expanded: this.filesExpanded,
+				hideUncommitted,
+				ucHidden: hideUncommitted ? ucTotalCum : 0,
+				revealPath: this.revealPath,
+				cumulative: true,
+			});
+			return;
+		}
+
 		if (this.loadedKey !== key) {
 			// Kick the async load exactly once per key, then show the loading placeholder.
 			if (this.loadingKey !== key) {
@@ -280,7 +332,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 						this.loadingKey = undefined;
 					});
 			}
-			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath });
+			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
 			return;
 		}
 
@@ -306,7 +358,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		const count = visible.length;
 		logBuild('files', tBuild, count, tree);
 		const ucHidden = hideUncommitted ? ucTotal : 0;
-		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden, revealPath: this.revealPath });
+		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden, revealPath: this.revealPath, cumulative: false });
 	}
 
 	/**
@@ -416,6 +468,54 @@ function mergeFiles(committed: ChangedFile[], uc: UncommittedChanges, reviewedFi
 	overlay(uc.staged, 'staged');
 	overlay(uc.unstaged, 'unstaged');
 	overlay(uc.untracked, 'untracked');
+	return [...map.values()];
+}
+
+/**
+ * Build the CUMULATIVE row set: one row per path from the merge-base→working-tree diff, plus the
+ * untracked files that `git diff` structurally cannot report.
+ *
+ * `uncommitted` here is DECORATIVE ONLY — it means "this file also has working-tree changes" and
+ * drives the ● marker, the italic label, and the hide-uncommitted filter. It does NOT drive routing:
+ * in cumulative mode every row opens the same merge-base↔working diff, because splitting a row back
+ * into its uncommitted slice is exactly the isolated view this mode replaces.
+ *
+ * Reviewed state is keyed by relPath, identical to `mergeFiles`, so checkboxes carry across modes.
+ */
+function cumulativeFiles(
+	cumulative: ChangedFile[],
+	uc: UncommittedChanges,
+	reviewedFiles: string[],
+): MergedFile[] {
+	const reviewed = new Set(reviewedFiles);
+	const dirty = new Set<string>();
+	for (const group of [uc.staged, uc.unstaged, uc.untracked]) {
+		for (const f of group) {
+			dirty.add(f.relPath);
+		}
+	}
+
+	const map = new Map<string, MergedFile>();
+	for (const f of cumulative) {
+		map.set(f.relPath, {
+			relPath: f.relPath,
+			status: f.status,
+			uncommitted: dirty.has(f.relPath),
+			reviewed: reviewed.has(f.relPath),
+		});
+	}
+	// `git diff` never reports untracked files, so they are added explicitly (status 'U'), matching
+	// how the split view surfaces them.
+	for (const f of uc.untracked) {
+		if (!map.has(f.relPath)) {
+			map.set(f.relPath, {
+				relPath: f.relPath,
+				status: 'U',
+				uncommitted: true,
+				reviewed: reviewed.has(f.relPath),
+			});
+		}
+	}
 	return [...map.values()];
 }
 
@@ -546,6 +646,7 @@ let hideUncommitted = false;   // host-authoritative; drives the empty-state mes
 let ucHidden = 0;              // count of uncommitted leaves the host filtered out
 let revealPath = null;         // relPath of the row mirroring the active editor (auto-reveal)
 let revealedEl = null;         // the rendered .row for revealPath, so paint() can scroll to it
+let cumulative = false;        // host-authoritative; in cumulative mode EVERY row opens one merged diff
 
 // \`expandAll\` renders every folder open while \`expanded\` stays empty, so a naive toggle would leave
 // only the clicked folder in the Set and collapse everything else. Materialize the currently-visible
@@ -658,7 +759,10 @@ function renderDir(dir, depth) {
 				row.appendChild(st);
 			}
 			row.addEventListener('click', () => {
-				vscode.postMessage({ type: 'openUncommitted', relPath: f.relPath, group: f.group });
+				// In cumulative mode the ● is decorative — the row still opens the one merged diff.
+				vscode.postMessage(cumulative
+					? { type: 'openCumulative', relPath: f.relPath }
+					: { type: 'openUncommitted', relPath: f.relPath, group: f.group });
 			});
 		} else {
 			// Committed leaf: reviewed checkbox + base…compare diff on click (unchanged behavior).
@@ -689,7 +793,9 @@ function renderDir(dir, depth) {
 				row.appendChild(st);
 			}
 			row.addEventListener('click', () => {
-				vscode.postMessage({ type: 'openFile', relPath: f.relPath });
+				vscode.postMessage(cumulative
+					? { type: 'openCumulative', relPath: f.relPath }
+					: { type: 'openFile', relPath: f.relPath });
 			});
 		}
 		frag.appendChild(row);
@@ -758,6 +864,7 @@ window.addEventListener('message', (e) => {
 		if (typeof m.hideUncommitted === 'boolean') { hideUncommitted = m.hideUncommitted; }
 		ucHidden = typeof m.ucHidden === 'number' ? m.ucHidden : 0;
 		if (typeof m.expanded === 'boolean') { expandAll = m.expanded; }
+		cumulative = !!m.cumulative;
 		// Adopt the host's reveal target so the highlight survives a full refresh.
 		revealPath = typeof m.revealPath === 'string' ? m.revealPath : null;
 		expandToReveal();

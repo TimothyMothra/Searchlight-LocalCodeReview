@@ -424,6 +424,32 @@ function parseNameStatus(out: string | undefined): ChangedFile[] {
 }
 
 /**
+ * The merge-base (common ancestor) of `base` and `compare` — the point the branch diverged.
+ * Returns undefined on any failure (unrelated histories, bad ref, no repo); never throws.
+ */
+export async function mergeBase(cwd: string, base: string, compare: string): Promise<string | undefined> {
+	const out = await gitv(['merge-base', base, compare], cwd);
+	const sha = out?.trim();
+	return sha && sha.length > 0 ? sha : undefined;
+}
+
+/**
+ * CUMULATIVE changed files: everything on the branch since it diverged, committed AND uncommitted,
+ * as ONE diff per file — `git diff --name-status <mergeBaseSha>`.
+ *
+ * The TWO-dot form with no right-hand ref diffs a commit against the WORKING TREE, so a file touched
+ * by a branch commit and then edited further appears once, with the combined change. Untracked files
+ * are invisible to `git diff` and must still come from `ls-files --others` (see
+ * `changedFilesUncommitted().untracked`).
+ *
+ * Parsing is delegated to the shared `parseNameStatus` so rename/copy score stripping and new-path
+ * selection stay identical to `changedFiles`. Returns `[]` on any failure.
+ */
+export async function changedFilesCumulative(cwd: string, mergeBaseSha: string): Promise<ChangedFile[]> {
+	return parseNameStatus(await gitv(['diff', '--name-status', mergeBaseSha], cwd));
+}
+
+/**
  * Uncommitted changes in the working tree, split into three SCM-style groups:
  *   - `staged`    → `git diff --cached --name-status` (index vs HEAD)
  *   - `unstaged`  → `git diff --name-status`          (worktree vs index)

@@ -8,16 +8,52 @@
 
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
+import { event, trace } from './diagnostics';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
+const diagnosticCommands = new Set([
+	'config', 'rev-parse', 'for-each-ref', 'worktree', 'pull', 'push', 'diff', 'log',
+	'symbolic-ref', 'rev-list', 'fetch', 'merge', 'diff-tree', 'merge-base', 'ls-files',
+]);
+const diagnosticOptions = new Set([
+	'--abbrev-ref', '--show-toplevel', '--format', '--porcelain', '--name-status',
+	'--max-count', '--pretty', '--verify', '--end-of-options', '--quiet', '--left-right',
+	'--count', '--ff-only', '--no-commit-id', '--name-only', '-r', '--cached',
+	'--others', '--exclude-standard', '--is-ancestor', '--all',
+	'--include-root-refs',
+]);
+
+function commandFields(args: string[], execution: 'shell' | 'execFile'): Record<string, string> {
+	// ASSUMPTION: only allowlisted command/option names are diagnostic data; argument values
+	// (including format strings, refs, paths and user config) must never enter the trace.
+	const options: string[] = [];
+	for (const arg of args.slice(1)) {
+		if (arg === '--' || arg === '--end-of-options') {
+			if (arg === '--end-of-options') { options.push(arg); }
+			break;
+		}
+		const option = arg.split('=', 1)[0];
+		if (diagnosticOptions.has(option)) { options.push(option); }
+	}
+	return {
+		execution,
+		command: diagnosticCommands.has(args[0]) ? args[0] : 'other',
+		options: options.join(' '),
+		...(args[0] === 'worktree' && args[1] === 'list' ? { subcommand: 'list' } : {}),
+	};
+}
+
 /** Run a git command in `cwd`; return trimmed stdout, or undefined on any failure. */
 async function git(args: string, cwd: string): Promise<string | undefined> {
+	const fields = commandFields(args.split(/\s+/), 'shell');
 	try {
-		const { stdout } = await execAsync(`git ${args}`, { cwd, windowsHide: true });
+		const { stdout } = await trace('git.command',
+			() => execAsync(`git ${args}`, { cwd, windowsHide: true }), fields);
 		return stdout.trim();
 	} catch {
+		event('git.fallback', { ...fields, outcome: 'undefined' });
 		return undefined;
 	}
 }
@@ -25,6 +61,7 @@ async function git(args: string, cwd: string): Promise<string | undefined> {
 /** The configured git user.name for `cwd`, falling back to 'user' when unset. */
 export async function getGitUserName(cwd: string): Promise<string> {
 	const name = await git('config user.name', cwd);
+	if (!name) { event('git.missing', { operation: 'userName', fallback: 'default' }); }
 	return name && name.length > 0 ? name : 'user';
 }
 
@@ -64,17 +101,20 @@ export interface Worktree {
  * where cmd.exe would otherwise treat `%name%` as an environment variable reference.
  * Returns trimmed stdout, or undefined on any failure.
  */
-async function gitv(args: string[], cwd: string): Promise<string | undefined> {
+async function gitv(args: string[], cwd: string, maxBuffer?: number): Promise<string | undefined> {
 	try {
-		return await runGitQuery(cwd, args);
+		return await runGitQuery(cwd, args, maxBuffer);
 	} catch {
+		event('git.fallback', { ...commandFields(args, 'execFile'), outcome: 'undefined' });
 		return undefined;
 	}
 }
 
 /** Read-only queries whose failures must be surfaced rather than treated as empty results. */
-export async function runGitQuery(cwd: string, args: string[]): Promise<string> {
-	const { stdout } = await execFileAsync('git', args, { cwd, windowsHide: true });
+export async function runGitQuery(cwd: string, args: string[], maxBuffer?: number): Promise<string> {
+	const { stdout } = await trace('git.command',
+		() => execFileAsync('git', args, { cwd, windowsHide: true, ...(maxBuffer === undefined ? {} : { maxBuffer }) }),
+		commandFields(args, 'execFile'));
 	return stdout.trim();
 }
 
@@ -83,29 +123,91 @@ export async function getRepoRoot(cwd: string): Promise<string | undefined> {
 	return gitv(['rev-parse', '--show-toplevel'], cwd);
 }
 
+let supportsRootRefEnumeration: boolean | undefined;
+
 /**
  * List local + remote branches via the git CLI (fallback when the vscode.git API is unavailable).
  * Remote HEAD pointers (e.g. `origin/HEAD`) are skipped.
  */
 export async function listBranchesCli(cwd: string): Promise<BranchRef[]> {
+	// %(refname:short) performs ambiguity lookups for each ref. On Windows these filesystem
+	// probes dominated startup. Enumerate ordinary refs once and check common names in memory.
+	const args = ['for-each-ref', '--format=%(refname)\t%(objectname)'];
+	let out: string | undefined;
+	if (supportsRootRefEnumeration !== false) {
+		try {
+			out = await runGitQuery(cwd, [...args, '--include-root-refs'], 16 * 1024 * 1024);
+			supportsRootRefEnumeration = true;
+		} catch (error) {
+			// Older Git versions reject this optional flag with usage exit 129. Do not mask
+			// repository/permission failures or change any Git configuration.
+			if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== 129) {
+				event('git.fallback', { operation: 'branchCatalog', outcome: 'undefined' });
+				return [];
+			}
+			supportsRootRefEnumeration = false;
+			event('git.rootRefEnumerationUnsupported');
+		}
+	}
+	if (supportsRootRefEnumeration === false) { out = await gitv(args, cwd, 16 * 1024 * 1024); }
+	if (!out) { return []; }
+	const rows = out.split(/\r?\n/).map((line) => line.split('\t'));
+	// Windows loose-ref lookups may be case-insensitive; conservatively delegate those
+	// collisions to Git rather than assuming packed-ref case behavior.
+	const lookupKey = (name: string) => process.platform === 'win32' ? name.toLowerCase() : name;
+	const names = new Set(rows.map(([name]) => lookupKey(name)));
+	const candidates: { fullName: string; ref: BranchRef; needsGit: boolean }[] = [];
+	for (const [fullName, commit] of rows) {
+		const kind = fullName.startsWith('refs/heads/') ? 'local' :
+			fullName.startsWith('refs/remotes/') ? 'remote' : undefined;
+		if (!kind || fullName.endsWith('/HEAD')) { continue; }
+		const name = fullName.slice(kind === 'local' ? 'refs/heads/'.length : 'refs/remotes/'.length);
+		const alternatives = [
+			name, `refs/${name}`, `refs/tags/${name}`, `refs/heads/${name}`,
+			`refs/remotes/${name}`, `refs/remotes/${name}/HEAD`,
+		];
+		// ASSUMPTION: old Git cannot enumerate root refs. Delegate simple names in that case;
+		// known collisions always use Git's own core.warnAmbiguousRefs-dependent shortening.
+		const needsGit = (supportsRootRefEnumeration === false && !name.includes('/')) ||
+			alternatives.some((candidate) => candidate !== fullName && names.has(lookupKey(candidate)));
+		candidates.push({ fullName, ref: { name, kind, commit: commit || undefined }, needsGit });
+	}
+	const ambiguous = candidates.filter((candidate) => candidate.needsGit);
+	const shortened = new Map<string, string>();
+	// Bound argv length for Windows without truncating the catalog. Exact ref names cannot
+	// have child refs (Git rejects file/directory ref conflicts), so these select only the exceptions.
+	for (let index = 0; index < ambiguous.length;) {
+		const batch: string[] = [];
+		let length = 0;
+		while (index < ambiguous.length && (batch.length === 0 || length + ambiguous[index].fullName.length < 12000)) {
+			const name = ambiguous[index++].fullName;
+			batch.push(name);
+			length += name.length + 3;
+		}
+		const result = await gitv(['for-each-ref', '--format=%(refname)\t%(refname:short)', ...batch], cwd, 16 * 1024 * 1024);
+		if (result === undefined) { return []; }
+		for (const line of result.split(/\r?\n/)) {
+			const [fullName, name] = line.split('\t');
+			if (name) { shortened.set(fullName, name); }
+		}
+	}
 	const refs: BranchRef[] = [];
-	const parse = (out: string | undefined, kind: 'local' | 'remote') => {
-		if (!out) {
-			return;
-		}
-		for (const line of out.split(/\r?\n/)) {
-			if (!line) {
+	for (const candidate of candidates) {
+		if (candidate.needsGit) {
+			const name = shortened.get(candidate.fullName);
+			// A ref removed during enumeration must not reappear under an invented shorthand.
+			if (!name) {
+				event('git.branchCatalogRemovedRef');
 				continue;
 			}
-			const [name, commit] = line.split('\t');
-			if (!name || name.endsWith('/HEAD')) {
-				continue;
-			}
-			refs.push({ name, kind, commit: commit || undefined });
+			candidate.ref.name = name;
 		}
-	};
-	parse(await gitv(['for-each-ref', '--format=%(refname:short)\t%(objectname)', 'refs/heads'], cwd), 'local');
-	parse(await gitv(['for-each-ref', '--format=%(refname:short)\t%(objectname)', 'refs/remotes'], cwd), 'remote');
+		refs.push(candidate.ref);
+	}
+	event('git.branchCatalog', {
+		refCount: rows.length, branchCount: refs.length, shortenedByGit: ambiguous.length,
+		rootRefsIncluded: supportsRootRefEnumeration,
+	});
 	return refs;
 }
 
@@ -154,7 +256,8 @@ export async function listWorktreesCli(cwd: string): Promise<Worktree[]> {
  * Throws on failure so callers can surface progress/error state.
  */
 export async function pullCli(cwd: string): Promise<void> {
-	await execFileAsync('git', ['pull'], { cwd, windowsHide: true });
+	await trace('git.command', () => execFileAsync('git', ['pull'], { cwd, windowsHide: true }),
+		commandFields(['pull'], 'execFile'));
 }
 
 /**
@@ -169,7 +272,8 @@ export async function pushCli(cwd: string, remote?: string, branch?: string): Pr
 			args.push(branch);
 		}
 	}
-	await execFileAsync('git', args, { cwd, windowsHide: true });
+	await trace('git.command', () => execFileAsync('git', args, { cwd, windowsHide: true }),
+		commandFields(args, 'execFile'));
 }
 
 /** A single commit entry from a log range. */
@@ -293,15 +397,20 @@ export async function defaultBaseBranch(cwd: string): Promise<string | undefined
 	// Prefer a local `main`.
 	const localMain = await gitv(['rev-parse', '--verify', '--quiet', 'refs/heads/main'], cwd);
 	if (localMain) {
+		event('git.defaultBase', { source: 'localDefault' });
 		return 'main';
 	}
+	event('git.fallback', { operation: 'defaultBase', reason: 'localDefaultUnavailable' });
 	// Else the remote default branch that origin/HEAD points at.
 	const originHead = await gitv(['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], cwd);
 	if (originHead) {
+		event('git.defaultBase', { source: 'remoteDefault' });
 		return originHead.replace(/^refs\/remotes\//, '');
 	}
+	event('git.fallback', { operation: 'defaultBase', reason: 'remoteDefaultUnavailable' });
 	// Else the first branch we can list.
 	const branches = await listBranchesCli(cwd);
+	event('git.defaultBase', { source: branches.length > 0 ? 'firstBranch' : 'missing', branchCount: branches.length });
 	return branches.length > 0 ? branches[0].name : undefined;
 }
 
@@ -327,6 +436,7 @@ export async function aheadBehind(cwd: string, branch: string): Promise<AheadBeh
 		cwd,
 	);
 	if (!upstream) {
+		event('git.missing', { operation: 'aheadBehind', reason: 'upstreamUnavailable' });
 		return undefined;
 	}
 	// `git rev-list --left-right --count <branch>...<branch>@{upstream}` => "<ahead>\t<behind>".
@@ -335,6 +445,7 @@ export async function aheadBehind(cwd: string, branch: string): Promise<AheadBeh
 		cwd,
 	);
 	if (!counts) {
+		event('git.missing', { operation: 'aheadBehind', reason: 'countsUnavailable' });
 		return undefined;
 	}
 	const [aheadStr, behindStr] = counts.split(/\s+/);

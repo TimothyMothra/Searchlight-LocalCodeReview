@@ -36,11 +36,17 @@ extension.ts ............ activation, view wiring, command registration, Ask-Cop
   ├─ filesView.ts ......... TreeView: changed files (folder tree, reviewed-file checkboxes)
   ├─ commitsView.ts ....... TreeView: commit list, click = per-commit multi-file diff
   ├─ conversationsView.ts . TreeView: reviews -> threads -> comments, jump to file:line
+  ├─ conversationDocument.ts . read-only virtual conversation tabs, independent of code files
+  ├─ conversationModel.ts .... full transcript formatting and stable conversation references
   ├─ commentController.ts . native vscode.comments threads (inline gutter UI)
   ├─ reviewDiff.ts ........ ReviewDiffContentProvider serving historical blobs for diffs
   ├─ tagCompletion.ts ..... /tag CompletionItemProvider for the comment input
   ├─ statusBar.ts ......... active-review status bar item
-  └─ perf.ts .............. [perf] OUTPUT-channel timing helpers
+  ├─ perf.ts .............. [perf] OUTPUT-channel timing adapter
+  ├─ diagnostics.ts ....... monotonic, correlated, bounded local startup trace
+  ├─ webviewMetrics.ts .... state delivery / DOM readiness / paint-opportunity protocol
+  ├─ usage.ts ............. bounded local feature-action and exposure summaries
+  └─ usageContext.ts ...... privacy-preserving editor-context classification
 ```
 
 ## 3. The four views
@@ -74,6 +80,11 @@ consistent.
 - `compare` = SOURCE branch under review → maps to `review.sourceBranch`.
 - `changedFiles` / `logRange` results are memoized keyed by the effective baseline/compare commit pair, so re-renders
   don't re-shell git.
+- The Comparison pane shares an in-flight branch-catalog request and retains its completed result
+  across selection/review/worktree-only refreshes. Ref changes, explicit refresh and Git operations
+  invalidate it. HEAD and staleness remain live; overtaken state builds never post an older selection.
+  CLI enumeration reads full refs once and performs ambiguity checks in memory. Only collisions
+  need Git's short-ref disambiguation, in bounded batches. Empty/failure results are not retained.
 - The review file is created **lazily**: only a mutation (a reviewed-file checkbox toggle or a
   comment add/reply) persists `comments.json`.
 
@@ -123,8 +134,14 @@ Overtaken resolutions/results are discarded so an older query cannot replace a n
 4. Register the four providers, all reading `() => active`.
 5. Register `ReviewDiffContentProvider` on the diff scheme, `registerTagCompletion()`, the file
    watcher, and ~40 commands.
-6. Kick off a **background IIFE** that resolves the real repo root, computes default branches,
-   resolves the comparison, and calls `refreshAll()`.
+6. Leave heavy comparison initialization **deferred** until a pane, comparison command, or new
+   inline discussion needs it. Concurrent requests share initialization of the repo root,
+   defaults, comparison, subscriptions and first refresh.
+
+`onStartupFinished` activation makes inline discussions available in ordinary and Source Control
+editors without opening Searchlight. Existing threads/replies do not require comparison Git work.
+Usage observation starts here too, independently of performance logging; it records fixed feature
+labels and editor categories, never user content. See [Local feature usage](usage-diagnostics.md).
 
 This ordering exists because on Windows, git spawns during the startup burst are each scanned by
 Defender; awaiting them in `activate()` measured tens of seconds of dead time. Returning first and
@@ -132,6 +149,18 @@ doing git work in the background keeps the panel responsive.
 
 `refreshAll()` refreshes all four providers, re-renders the CommentController from disk, and updates
 the status bar.
+
+Review discovery walks only each workspace's `.vscode/searchlight-reviews` subtree, not the
+workspace search index. Simultaneous discovery requests share the in-flight directory walk;
+completed results are not cached, and each caller still parses independent review objects.
+Missing stores are empty; other filesystem errors propagate. Linked directories are not traversed
+(to avoid escaping the store or following cycles), and their count is recorded in diagnostics.
+
+Activation return, background completion and visible content readiness are separate milestones.
+Every pane (including Comparison) reports DOM completion and a subsequent paint opportunity,
+distinguishing placeholders from resolved content, empty states and errors. Git/API/storage spans
+and refresh causes are correlated under the initiating operation. The export command snapshots the
+local trace without waiting for pending work. See [Startup diagnostics](startup-diagnostics.md).
 
 ## 6. CommentController (inline threads)
 
@@ -147,6 +176,25 @@ the status bar.
 
 It re-renders from disk on demand, so the file watcher can call it after **any** external change —
 including this extension's own writes and the `copilot` CLI shell-out.
+
+### Reading discussions after code disappears
+
+In Conversations, clicking a thread or reply defaults to the code location. **Read** opens a
+read-only Markdown transcript in an editor tab, even if the code file is gone. Threads without a
+recorded file location default to the transcript. **Code** also jumps to the file. Reading never resolves a
+thread and never requires opening the source file or recovering a Git blob.
+
+The transcript includes every saved reply (including full Copilot responses), author/model
+details, original location, and any captured anchor line. A deleted uncommitted file may never
+have existed in Git: the saved anchor is explicitly labeled as a single trimmed line, not a full
+historical file/diff. Missing anchor text is reported rather than invented. An unavailable anchor
+does not dim or hide the discussion.
+
+`searchlight-conversation` documents are backed by review data, not files written to the
+workspace. Stable-ID conversations refresh when their review file changes, including external
+Copilot responses. Open tabs retain a clearly labeled last-known transcript if the review data
+temporarily becomes unavailable. Legacy threads without IDs use fingerprinted snapshots so
+reordering cannot silently switch an open tab to a different discussion.
 
 ## 7. The Ask-Copilot bridge (schema → agent contract)
 

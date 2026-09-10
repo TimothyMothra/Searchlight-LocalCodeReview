@@ -41,6 +41,28 @@
 
 import * as vscode from 'vscode';
 
+/** DOM completion and a paint opportunity are separate signals; neither proves pixels were presented. */
+export function renderMetricsScript(): string {
+	return /* js */ `
+  let diagnostic;
+  window.addEventListener('message', (event) => {
+    if (event.data.type === 'state') diagnostic = event.data.diagnostic;
+  });
+  function reportRendered(view, count, t0) {
+    if (!diagnostic) return;
+    const requestId = diagnostic.requestId;
+    const ms = performance.now() - t0;
+    vscode.postMessage({ type: 'rendered', view, count, ms, requestId });
+    // ASSUMPTION: two animation frames allow a paint opportunity, not a guaranteed compositor paint.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (diagnostic && diagnostic.requestId === requestId) {
+        vscode.postMessage({ type: 'paintOpportunity', view, count, ms: performance.now() - t0, requestId });
+      }
+    }));
+  }
+`;
+}
+
 /** A 32-char alphanumeric nonce for the webview's script-src CSP directive (fresh per load). */
 export function getNonce(): string {
 	const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -97,14 +119,7 @@ export function webviewHtml(opts: WebviewHtmlOptions): string {
   // Post the client-side render duration back to the host for the metrics protocol.
   // Panes capture \`const t0 = performance.now()\` when a {type:'state',...} message arrives,
   // render, then call reportRendered(view, count, t0).
-  function reportRendered(view, count, t0) {
-    vscode.postMessage({
-      type: 'rendered',
-      view: view || __searchlightView,
-      ms: performance.now() - t0,
-      count: count,
-    });
-  }
+  ${renderMetricsScript()}
 `;
 
 	return /* html */ `<!DOCTYPE html>

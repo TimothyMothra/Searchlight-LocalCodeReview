@@ -14,6 +14,7 @@ import { Baseline, resolveBaseline, resolveBaselinePin } from './baseline';
 import { computeReviewPaths, emptyReview, loadReview } from './reviewStore';
 import { Review } from './reviewModel';
 import { perfCount } from './perf';
+import { event, now, trace } from './diagnostics';
 
 /** Holds and resolves the active base/compare comparison + its review. */
 export class ActiveComparison {
@@ -108,6 +109,10 @@ export class ActiveComparison {
 	 * when detached). Silent — never shows a popup.
 	 */
 	async computeDefaults(): Promise<void> {
+		return trace('comparison.defaults', () => this.computeDefaultsCore());
+	}
+
+	private async computeDefaultsCore(): Promise<void> {
 		// getHead and defaultBaseBranch are independent — resolve them together.
 		const [head, defBase] = await Promise.all([
 			getHead(this.repoRootFsPath),
@@ -134,6 +139,10 @@ export class ActiveComparison {
 	 * yet written to disk).
 	 */
 	async resolve(): Promise<void> {
+		return trace('comparison.resolve', () => this.resolveCore());
+	}
+
+	private async resolveCore(): Promise<void> {
 		const version = ++this.resolveVersion;
 		// HEAD must be resolved BEFORE the commits: auto-follow below can change `compare`, and
 		// resolving `compareCommit` from a stale branch name would show the new branch with the old
@@ -155,6 +164,7 @@ export class ActiveComparison {
 
 		if (version !== this.resolveVersion) { return; }
 		if (!base || !compare) {
+			event('comparison.outcome', { state: 'unselected' });
 			this.headBranch = headBranch;
 			this.headCommit = head.commit;
 			this.baseCommit = undefined;
@@ -214,6 +224,7 @@ export class ActiveComparison {
 				this.baseCommit,
 			);
 		}
+		event('comparison.outcome', { state: baselineError ? 'error' : 'resolved', pinned: !!pin, existingReview: !!existing });
 	}
 
 	/**
@@ -227,7 +238,10 @@ export class ActiveComparison {
 		if (!this.sourceFile) {
 			return;
 		}
-		const r = await loadReview(vscode.Uri.file(this.sourceFile));
+		const sourceFile = this.sourceFile;
+		const key = this.comparisonKey;
+		const r = await loadReview(vscode.Uri.file(sourceFile));
+		if (sourceFile !== this.sourceFile || key !== this.comparisonKey) { return; }
 		if (r) {
 			// Mirror the load branch in resolve(): populate the runtime-only path + default array.
 			r.sourceFile = this.sourceFile;
@@ -303,10 +317,13 @@ export class ActiveComparison {
 		}
 		const key = this.pairKey();
 		if (this.changedFilesKey === key) {
+			event('files.cache', { hit: true });
 			return this.changedFilesValue;
 		}
-		const t = Date.now();
-		this.changedFilesValue = await changedFiles(this.repoRootFsPath, this.baselineCommit, this.compareCommit);
+		event('files.cache', { hit: false });
+		const t = now();
+		const { baselineCommit, compareCommit } = this;
+		this.changedFilesValue = await trace('files.query', () => changedFiles(this.repoRootFsPath, baselineCommit, compareCommit));
 		this.changedFilesKey = key;
 		perfCount('files.data-load', t, this.changedFilesValue.length);
 		return this.changedFilesValue;
@@ -325,8 +342,10 @@ export class ActiveComparison {
 		if (!this.baselineCommit) {
 			return [];
 		}
-		const t = Date.now();
-		const files = await changedFilesCumulative(this.repoRootFsPath, this.baselineCommit);
+		event('files.cumulativeCache', { policy: 'uncached-working-tree' });
+		const t = now();
+		const baseline = this.baselineCommit;
+		const files = await trace('files.cumulativeQuery', () => changedFilesCumulative(this.repoRootFsPath, baseline));
 		perfCount('files.data-load-cumulative', t, files.length);
 		return files;
 	}
@@ -338,10 +357,13 @@ export class ActiveComparison {
 		}
 		const key = this.pairKey();
 		if (this.commitsKey === key) {
+			event('commits.cache', { hit: true });
 			return { commits: this.commitsValue, truncated: this.commitsTruncated };
 		}
-		const t = Date.now();
-		const result = await logRange(this.repoRootFsPath, this.baselineCommit, this.compareCommit);
+		event('commits.cache', { hit: false });
+		const t = now();
+		const { baselineCommit, compareCommit } = this;
+		const result = await trace('commits.query', () => logRange(this.repoRootFsPath, baselineCommit, compareCommit));
 		this.commitsValue = result.commits;
 		this.commitsTruncated = result.truncated;
 		this.commitsKey = key;

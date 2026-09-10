@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Review } from './reviewModel';
 import { scanReviews } from './reviewStore';
+import { milestone, trace } from './diagnostics';
 
 const ACTIVE_KEY = 'searchlight.activeReviewDir';
 
@@ -52,6 +53,13 @@ export class ReviewStatusBar implements vscode.Disposable {
 
 	/** Refresh the status-bar label/visibility from disk. */
 	async update(): Promise<void> {
+		return trace('statusBar.update', async () => {
+			await this.updateCore();
+			milestone('statusBar.ready');
+		});
+	}
+
+	private async updateCore(): Promise<void> {
 		const review = await this.getActiveReview();
 		if (!review) {
 			this.item.hide();

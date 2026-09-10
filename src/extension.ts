@@ -29,9 +29,9 @@ import {
 } from './git';
 import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
-import { FilesWebviewProvider, syncUncommittedContext } from './filesWebview';
+import { FilesWebviewProvider, isUncommittedHidden, syncUncommittedContext } from './filesWebview';
 import { CommitsWebviewProvider } from './commitsWebview';
-import { ConversationsWebviewProvider, syncResolvedContext } from './conversationsWebview';
+import { ConversationsWebviewProvider, isResolvedHidden, syncResolvedContext } from './conversationsWebview';
 import {
 	DIFF_SCHEME,
 	ReviewDiffContentProvider,
@@ -44,6 +44,11 @@ import {
 	UncommittedGroup,
 } from './reviewDiff';
 import { initPerf, perf, perfLine } from './perf';
+import { diagnosticsEnabled, diagnosticsRunId, diagnosticsSnapshot, event, milestone, now, setDiagnosticsEnabled, trace } from './diagnostics';
+import { setComparisonSettled, paneSnapshot, resetPaneMetrics } from './webviewMetrics';
+import { initUsage, setUsageEnabled, recordUsage, usageEditor, usageFocus, usageSnapshot, emitUsageSummary } from './usage';
+import { classifyEditorInput, editorInputIdentity } from './usageContext';
+import { ConversationDocumentProvider, CONVERSATION_SCHEME } from './conversationDocument';
 
 /** Shared "Searchlight" output channel for user-visible git/action feedback. Assigned in `activate`. */
 let outputChannel: vscode.OutputChannel | undefined;
@@ -55,13 +60,160 @@ function log(message: string): void {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	const tActivate = now();
 	// Shared output channel for git/action feedback (Update, terminal, etc.).
 	outputChannel = vscode.window.createOutputChannel('Searchlight');
 	context.subscriptions.push(outputChannel);
-	initPerf(outputChannel);
+	const cfg = vscode.workspace.getConfiguration('searchlight');
+	initPerf(outputChannel, tActivate, {
+		extensionVersion: context.extension.packageJSON.version,
+		vscodeVersion: vscode.version, nodeVersion: process.version,
+		platform: process.platform, arch: process.arch,
+		workspaceFolders: vscode.workspace.workspaceFolders?.length ?? 0,
+		autoCreateOnEmpty: cfg.get<boolean>('autoCreateOnEmpty', true),
+		deferThreadsOnLoad: cfg.get<boolean>('deferThreadsOnLoad', true),
+		cumulativeDiff: cfg.get<boolean>('files.cumulativeDiff', true),
+		compactFolders: cfg.get<boolean>('files.compactFolders', true),
+		autoReveal: cfg.get<boolean>('files.autoReveal', true),
+		hideUncommitted: isUncommittedHidden(context.workspaceState),
+		hideResolved: isResolvedHidden(context.workspaceState),
+		extensionMode: context.extensionMode,
+		trusted: vscode.workspace.isTrusted,
+	});
+	resetPaneMetrics();
+	initUsage({
+		runId: diagnosticsRunId(),
+		startMs: tActivate,
+		enabled: cfg.get<boolean>('usageLogging', true),
+		focused: vscode.window.state.focused,
+		sink: (line) => outputChannel?.appendLine(line),
+	});
+	let lastEditorKey: string | undefined;
+	const observeEditor = (initial = false) => {
+		const group = vscode.window.tabGroups.activeTabGroup;
+		const tab = group.activeTab;
+		// ASSUMPTION: VS Code may recreate Tab/input objects for unrelated updates. Compare stable
+		// input values instead; the private key stays in memory and never reaches usage records.
+		const identity = editorInputIdentity(tab?.input);
+		const editorKey = JSON.stringify([group.viewColumn, identity, identity === 'other' ? tab?.label : undefined]);
+		usageEditor(classifyEditorInput(tab?.input));
+		if (initial || editorKey !== lastEditorKey) {
+			recordUsage(initial ? 'editor.observed' : 'editor.changed');
+		}
+		lastEditorKey = editorKey;
+	};
+	observeEditor(true);
+	const usageTimer = setInterval(emitUsageSummary, 60000);
+	usageTimer.unref();
+	context.subscriptions.push(
+		vscode.window.tabGroups.onDidChangeTabs(() => observeEditor()),
+		vscode.window.tabGroups.onDidChangeTabGroups(() => observeEditor()),
+		vscode.window.onDidChangeWindowState((state) => usageFocus(state.focused)),
+		{ dispose: () => clearInterval(usageTimer) },
+	);
+
+	let initializeComparison: (() => Promise<void>) | undefined;
+	let comparisonInit: Promise<void> | undefined;
+	const ensureComparison = async (reason: string): Promise<void> => {
+		if (!initializeComparison) { throw new Error('Searchlight: open a workspace before starting a comparison.'); }
+		if (!comparisonInit) {
+			milestone('startup.comparisonRequested', { reason });
+			sampleHostForMinute();
+			comparisonInit = initializeComparison().catch((error) => {
+				comparisonInit = undefined;
+				milestone('startup.failed');
+				log(`Comparison initialization failed: ${errMessage(error)}`);
+				void vscode.window.showErrorMessage('Searchlight: comparison initialization failed. See the Searchlight output channel.');
+				throw error;
+			});
+		}
+		await comparisonInit;
+	};
+	const independentCommands = new Set([
+		'searchlight.exportStartupDiagnostics', 'searchlight.openThreadLocation',
+		'searchlight.viewConversation',
+		'searchlight.createOrReply', 'searchlight.resolveThread', 'searchlight.unresolveThread',
+		'searchlight.toggleThreadResolved', 'searchlight.askCopilotThread', 'searchlight.askCopilotReview',
+		'searchlight.copyCommitId', 'searchlight.copyBranchName', 'searchlight.copyDirPath',
+	]);
+	const registerCommand = <Args extends unknown[]>(command: string, handler: (...args: Args) => unknown) =>
+		vscode.commands.registerCommand(command, async (...args: Args) => {
+			observeEditor();
+			recordUsage('command.started', { command });
+			try {
+				if (!independentCommands.has(command)) { await ensureComparison('command'); }
+				const result = await handler(...args);
+				recordUsage('command.completed', { command });
+				return result;
+			} catch (error) {
+				recordUsage('command.failed', { command });
+				throw error;
+			}
+		});
+	const registerPane = (id: string, provider: vscode.WebviewViewProvider, retainContextWhenHidden = false) =>
+		vscode.window.registerWebviewViewProvider(id, {
+			async resolveWebviewView(view, viewContext, token) {
+				// Shells and usage visibility are observable immediately; Git work remains on demand.
+				await provider.resolveWebviewView(view, viewContext, token);
+				await ensureComparison('pane');
+			},
+		}, { webviewOptions: { retainContextWhenHidden } });
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration((e) => {
+			if (e.affectsConfiguration('searchlight.perfLogging')) {
+				setDiagnosticsEnabled(vscode.workspace.getConfiguration('searchlight').get<boolean>('perfLogging', true));
+			}
+			if (e.affectsConfiguration('searchlight.usageLogging')) {
+				setUsageEnabled(vscode.workspace.getConfiguration('searchlight').get<boolean>('usageLogging', true));
+			}
+		}),
+		registerCommand('searchlight.exportStartupDiagnostics', async () => {
+			const uri = await vscode.window.showSaveDialog({
+				title: 'Export Searchlight startup diagnostics',
+				defaultUri: vscode.Uri.joinPath(context.logUri, 'searchlight-startup.json'),
+				filters: { JSON: ['json'] },
+			});
+			if (!uri) { return; }
+			try {
+				const report = { trace: diagnosticsSnapshot(), panes: paneSnapshot(), usage: usageSnapshot() };
+				await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(report, null, 2), 'utf8'));
+				void vscode.window.showInformationMessage('Searchlight: startup diagnostics exported.');
+			} catch (error) {
+				void vscode.window.showErrorMessage(`Searchlight: diagnostic export failed: ${errMessage(error)}`);
+			}
+		}),
+	);
+
+	// ASSUMPTION: these are shared extension-host signals, not CPU/memory attributed to Searchlight.
+	let hostTimer: ReturnType<typeof setInterval> | undefined;
+	function sampleHostForMinute(): void {
+		if (hostTimer) { clearInterval(hostTimer); }
+		let lastSample = now();
+		let lastCpu = process.cpuUsage();
+		const samplingDeadline = lastSample + 60000;
+		hostTimer = setInterval(() => {
+			const current = now();
+			if (current >= samplingDeadline) { clearInterval(hostTimer); }
+			if (diagnosticsEnabled()) {
+				const cpu = process.cpuUsage();
+				const memory = process.memoryUsage();
+				event('host.sample', {
+					intervalMs: current - lastSample, eventLoopLagMs: Math.max(0, current - lastSample - 1000),
+					cpuUserMs: (cpu.user - lastCpu.user) / 1000, cpuSystemMs: (cpu.system - lastCpu.system) / 1000,
+					rssBytes: memory.rss, heapUsedBytes: memory.heapUsed,
+				});
+				lastCpu = cpu;
+			} else {
+				lastCpu = process.cpuUsage();
+			}
+			lastSample = current;
+		}, 1000);
+		hostTimer.unref();
+	}
+	sampleHostForMinute();
+	context.subscriptions.push({ dispose: () => { if (hostTimer) { clearInterval(hostTimer); } } });
 
 	// Load-time instrumentation: header + overall activation timer (gated by searchlight.perfLogging).
-	const tActivate = Date.now();
 	perfLine('--- activation ---');
 
 	// Status-bar active-review switcher (src → tgt); hidden when there's no review.
@@ -71,7 +223,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	if (!wsFolder) {
-		warnNoWorkspace();
+		milestone('activation.return', { outcome: 'no-workspace' });
 		return;
 	}
 
@@ -82,13 +234,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// several seconds (measured ~5s / ~18s / ~10s → 33s total) — but the SAME git ops are fast
 	// once the AV scan settles. VS Code shows "Activating Extensions..." until activate() resolves,
 	// so the fix is to STOP blocking activation on git, not to make git faster. We construct
-	// `active` with a `wsFolder` placeholder for repoRoot and resolve the real root (plus
-	// computeDefaults/resolve/refreshAll) in the background IIFE at the end of activate().
+	// `active` with a `wsFolder` placeholder. Comparison initialization is shared and deferred
+	// until a pane, comparison command, or new discussion actually needs it.
 	const active = new ActiveComparison(wsFolder, wsFolder, context.workspaceState);
 
 	// Inline comment threads. Constructed after `active` so new (first-ever) threads can target
 	// the currently-viewed comparison's review even before any comments.json exists on disk.
-	const comments = new SearchlightCommentController(() => active);
+	const comments = new SearchlightCommentController(() => active, () => ensureComparison('new-discussion'));
 	context.subscriptions.push(comments);
 
 	// Four stacked views, all reading from `active`. The comparison view is a webview inline selector;
@@ -96,19 +248,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const comparisonProvider = new ComparisonWebviewProvider(
 		() => active,
 		async (branch) => {
+			await ensureComparison('pane-action');
 			await active.setBase(branch);
-			refreshAll();
+			refreshAll('select-base');
 		},
 		async (branch) => {
+			await ensureComparison('pane-action');
 			await active.setCompare(branch);
-			refreshAll();
+			refreshAll('select-compare');
 		},
 		async (row) => {
-			await updateStaleBranch(active, row, refreshAll, (ok, message) =>
+			await ensureComparison('pane-action');
+			await updateStaleBranch(active, row, () => refreshAll('git-operation'), (ok, message) =>
 				comparisonProvider.postUpdateResult(row, ok, message),
 			);
 		},
 		async (reset) => {
+			await ensureComparison('pane-action');
 			// ASSUMPTION: pinning freezes a commit ID, never a moving branch expression.
 			const selectionKey = active.comparisonKey;
 			const value = reset ? undefined : await vscode.window.showInputBox({
@@ -123,7 +279,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					throw new Error('The comparison changed while entering a baseline. Try again.');
 				}
 				await active.setBaselinePin(value);
-				refreshAll();
+				refreshAll('baseline-pin');
 			} catch (error) {
 				void vscode.window.showErrorMessage(`Searchlight: ${errMessage(error)}`);
 			}
@@ -139,20 +295,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 
 	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider('searchlight.comparison', comparisonProvider),
+		registerPane('searchlight.comparison', comparisonProvider),
 	);
 	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider('searchlight.files', filesProvider, {
-			webviewOptions: { retainContextWhenHidden: true },
-		}),
+		registerPane('searchlight.files', filesProvider, true),
 	);
 	// The Commits pane is now a webview (Phase D). Its expand/collapse, lazy
 	// file listing, copy-sha button, and truncation node are handled inside
 	// CommitsWebviewProvider's message handling — no TreeView subscription.
 	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider('searchlight.commits', commitsProvider, {
-			webviewOptions: { retainContextWhenHidden: true },
-		}),
+		registerPane('searchlight.commits', commitsProvider, true),
 	);
 	// The Conversations pane is now a webview (Phase E). Its thread rows,
 	// per-comment #tag badges, resolve/unresolve inline buttons, and
@@ -160,9 +312,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// message handling — no TreeView subscription. refresh() re-posts state so
 	// the Files->Conversations refresh hook and refreshAll keep working.
 	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider('searchlight.conversations', conversationsProvider, {
-			webviewOptions: { retainContextWhenHidden: true },
-		}),
+		registerPane('searchlight.conversations', conversationsProvider, true),
 	);
 
 	// Seed the show/hide-uncommitted context key from persisted state so the correct title-bar button
@@ -183,13 +333,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 
 	// Refresh all four views + inline comments + status bar together.
-	const refreshAll = () => {
-		comparisonProvider.refresh();
-		filesProvider.refresh();
-		commitsProvider.refresh();
-		conversationsProvider.refresh();
-		void comments.render();
-		void statusBar.update();
+	const refreshAll = (reason = 'command-or-review-action') => {
+		// Dispatch stays fire-and-forget; child spans retain this refresh's correlation context.
+		void trace('refresh.dispatch', async () => {
+			event('refresh.request', { reason });
+			if (reason === 'manual-refresh' || reason === 'manual-resolve-refresh') { conversationDocuments.refresh(); }
+			comparisonProvider.refresh(['manual-refresh', 'manual-resolve-refresh', 'git-operation'].includes(reason));
+			filesProvider.refresh();
+			commitsProvider.refresh();
+			conversationsProvider.refresh();
+			void comments.render();
+			void statusBar.update();
+		}, { reason });
 	};
 
 	// Read-only content provider that serves historical file blobs for the diff view.
@@ -198,6 +353,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			DIFF_SCHEME,
 			new ReviewDiffContentProvider(),
 		),
+	);
+	const conversationDocuments = new ConversationDocumentProvider();
+	context.subscriptions.push(
+		conversationDocuments,
+		vscode.workspace.registerTextDocumentContentProvider(CONVERSATION_SCHEME, conversationDocuments),
+		registerCommand('searchlight.viewConversation', async (target: unknown) => {
+			try {
+				await conversationDocuments.open(target);
+			} catch (error) {
+				void vscode.window.showErrorMessage(`Searchlight: ${errMessage(error)}`);
+				throw error;
+			}
+		}),
 	);
 
 	// File checkbox toggles are handled inside FilesWebviewProvider.onToggleReviewed
@@ -211,14 +379,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// Manual refresh (also wired to the view/title button).
 	context.subscriptions.push(
-		vscode.commands.registerCommand('searchlight.refresh', () => {
-			refreshAll();
+		registerCommand('searchlight.refresh', () => {
+			refreshAll('manual-refresh');
 		}),
 	);
 
 	// Open a thread's file and reveal `filePath:startLine`.
 	context.subscriptions.push(
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.openThreadLocation',
 			async (filePath: string, startLine: number, endLine: number) => {
 				await openThreadLocation(filePath, startLine, endLine);
@@ -230,15 +398,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// ── Comment thread commands ────────────────────────────────────────────────
 	context.subscriptions.push(
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.createOrReply',
 			(reply: vscode.CommentReply) => comments.handleReply(reply),
 		),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.resolveThread',
 			(thread: vscode.CommentThread) => comments.setState(thread, 'resolved'),
 		),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.unresolveThread',
 			(thread: vscode.CommentThread) => comments.setState(thread, 'unresolved'),
 		),
@@ -247,7 +415,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		// which did not resolve reliably in the host VS Code build — so neither `when` matched and NO
 		// button rendered. This one command is keyed only on `commentController == searchlight`, so it
 		// renders unconditionally; the handler reads the thread's current state and flips it.
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.toggleThreadResolved',
 			async (thread: vscode.CommentThread) => {
 				const next =
@@ -259,7 +427,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				conversationsProvider.refresh();
 			},
 		),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.resolveThreadNode',
 			// The Conversations webview posts a { thread: { id } } stub; the former ConversationNode
 			// (native TreeItem, deleted in Phase F) satisfied this same minimal shape.
@@ -274,7 +442,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				conversationsProvider.refresh();
 			},
 		),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.unresolveThreadNode',
 			async (node: { thread?: { id?: string } }) => {
 				const reviewFile = active.review?.sourceFile;
@@ -287,7 +455,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				conversationsProvider.refresh();
 			},
 		),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.askCopilotThread',
 			async (thread: vscode.CommentThread) => {
 				const binding = comments.getBinding(thread);
@@ -300,7 +468,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				askCopilot(binding.reviewDir, binding.threadId);
 			},
 		),
-		vscode.commands.registerCommand('searchlight.askCopilotReview', async () => {
+		registerCommand('searchlight.askCopilotReview', async () => {
 			const review = await pickReview('Select a review for Copilot to look at');
 			if (review) {
 				askCopilot(path.dirname(review.sourceFile), undefined);
@@ -310,15 +478,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// ── Copy commands ──────────────────────────────────────────────────────────
 	context.subscriptions.push(
-		vscode.commands.registerCommand('searchlight.copyCommitId', async () => {
+		registerCommand('searchlight.copyCommitId', async () => {
 			const review = await pickReview('Copy commit id from which review?');
 			await copyValue(review?.sourceCommit, 'commit id');
 		}),
-		vscode.commands.registerCommand('searchlight.copyBranchName', async () => {
+		registerCommand('searchlight.copyBranchName', async () => {
 			const review = await pickReview('Copy branch name from which review?');
 			await copyValue(review?.sourceBranch, 'branch name');
 		}),
-		vscode.commands.registerCommand('searchlight.copyDirPath', async () => {
+		registerCommand('searchlight.copyDirPath', async () => {
 			const review = await pickReview('Copy directory path from which review?');
 			await copyValue(review ? path.dirname(review.sourceFile) : undefined, 'directory path');
 		}),
@@ -326,34 +494,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// ── Git / directory integration (v1.5) ────────────────────────────────────
 	context.subscriptions.push(
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.pickBranches',
 			async (node?: { review?: Review }) => {
 				await pickBranches(node?.review, refreshAll);
 			},
 		),
-		vscode.commands.registerCommand('searchlight.switchReview', async () => {
+		registerCommand('searchlight.switchReview', async () => {
 			await switchReview(statusBar, refreshAll);
 		}),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.openDirectory',
 			async (node?: { review?: Review }) => {
 				await openDirectory(node?.review);
 			},
 		),
-		vscode.commands.registerCommand('searchlight.gitPull', async () => {
+		registerCommand('searchlight.gitPull', async () => {
 			await runGit('pull', async () => {
 				await active.resolve();
-				refreshAll();
+				refreshAll('git-operation');
 			});
 		}),
-		vscode.commands.registerCommand('searchlight.gitPush', async () => {
+		registerCommand('searchlight.gitPush', async () => {
 			await runGit('push', async () => {
 				await active.resolve();
-				refreshAll();
+				refreshAll('git-operation');
 			});
 		}),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.openTerminalHere',
 			async (node?: { review?: Review }) => {
 				await openTerminalHere(node?.review);
@@ -363,7 +531,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// ── Four-view comparison commands ──────────────────────────────────────────
 	context.subscriptions.push(
-		vscode.commands.registerCommand('searchlight.pickBase', async () => {
+		registerCommand('searchlight.pickBase', async () => {
 			const chosen = await pickBranch(active.repoRootFsPath, 'Select the base (target) branch', {
 				current: active.base,
 			});
@@ -372,7 +540,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				refreshAll();
 			}
 		}),
-		vscode.commands.registerCommand('searchlight.pickCompare', async () => {
+		registerCommand('searchlight.pickCompare', async () => {
 			const chosen = await pickBranch(
 				active.repoRootFsPath,
 				'Select the compare (source) branch',
@@ -383,68 +551,68 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				refreshAll();
 			}
 		}),
-		vscode.commands.registerCommand('searchlight.swapBranches', async () => {
+		registerCommand('searchlight.swapBranches', async () => {
 			await active.swap();
 			refreshAll();
 		}),
-		vscode.commands.registerCommand('searchlight.copyCompareBranch', () =>
+		registerCommand('searchlight.copyCompareBranch', () =>
 			comparisonProvider.copyCompareBranchName(),
 		),
-		vscode.commands.registerCommand('searchlight.copyComparePath', () =>
+		registerCommand('searchlight.copyComparePath', () =>
 			comparisonProvider.copyCompareBranchPath(),
 		),
-		vscode.commands.registerCommand('searchlight.refreshAll', async () => {
+		registerCommand('searchlight.refreshAll', async () => {
 			await active.resolve();
-			refreshAll();
+			refreshAll('manual-resolve-refresh');
 		}),
-		vscode.commands.registerCommand('searchlight.filesExpandAll', () => {
+		registerCommand('searchlight.filesExpandAll', () => {
 			filesProvider.setExpanded(true);
 		}),
-		vscode.commands.registerCommand('searchlight.filesHideUncommitted', async () => {
+		registerCommand('searchlight.filesHideUncommitted', async () => {
 			await filesProvider.setHideUncommitted(true);
 		}),
-		vscode.commands.registerCommand('searchlight.filesShowUncommitted', async () => {
+		registerCommand('searchlight.filesShowUncommitted', async () => {
 			await filesProvider.setHideUncommitted(false);
 		}),
-		vscode.commands.registerCommand('searchlight.conversationsHideResolved', async () => {
+		registerCommand('searchlight.conversationsHideResolved', async () => {
 			await conversationsProvider.setHideResolved(true);
 		}),
-		vscode.commands.registerCommand('searchlight.conversationsShowResolved', async () => {
+		registerCommand('searchlight.conversationsShowResolved', async () => {
 			await conversationsProvider.setHideResolved(false);
 		}),
-		vscode.commands.registerCommand('searchlight.collapseAllCommits', () => {
+		registerCommand('searchlight.collapseAllCommits', () => {
 			// The Commits pane is a webview (Phase D); collapsing is pure UI state
 			// posted to the webview, which collapses all expanded commit rows.
 			commitsProvider.setExpanded(false);
 		}),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.updateStaleBranch',
 			async (row?: 'base' | 'compare') => {
-				await updateStaleBranch(active, row, refreshAll);
+				await updateStaleBranch(active, row, () => refreshAll('git-operation'));
 			},
 		),
-		vscode.commands.registerCommand('searchlight.openFileDiff', async (relPath: string) => {
+		registerCommand('searchlight.openFileDiff', async (relPath: string) => {
 			await openFileDiff(active, relPath);
 		}),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.openUncommittedFileDiff',
 			async (relPath: string, group: UncommittedGroup) => {
 				await openUncommittedFileDiff(active, relPath, group);
 			},
 		),
-		vscode.commands.registerCommand('searchlight.openCumulativeFileDiff', async (relPath: string) => {
+		registerCommand('searchlight.openCumulativeFileDiff', async (relPath: string) => {
 			await openCumulativeFileDiff(active, relPath);
 		}),
-		vscode.commands.registerCommand('searchlight.openCommitDiff', async (sha: string) => {
+		registerCommand('searchlight.openCommitDiff', async (sha: string) => {
 			await openCommitDiff(active, sha);
 		}),
-		vscode.commands.registerCommand(
+		registerCommand(
 			'searchlight.openCommitFileDiff',
 			async (sha: string, relPath: string) => {
 				await openCommitFileDiff(active, sha, relPath);
 			},
 		),
-		vscode.commands.registerCommand('searchlight.openTerminal', () => {
+		registerCommand('searchlight.openTerminal', () => {
 			const leaf = active.compare ? shortBranch(active.compare) : 'terminal';
 			const terminal = vscode.window.createTerminal({
 				name: `Searchlight: ${leaf}`,
@@ -452,10 +620,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			});
 			terminal.show();
 		}),
-		vscode.commands.registerCommand('searchlight.commitsViewAllChanges', async () => {
+		registerCommand('searchlight.commitsViewAllChanges', async () => {
 			await openAllChangesDiff(active);
 		}),
-		vscode.commands.registerCommand('searchlight.copyCommitSha', async (node?: unknown) => {
+		registerCommand('searchlight.copyCommitSha', async (node?: unknown) => {
 			const sha =
 				typeof node === 'string'
 					? node
@@ -472,25 +640,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const watcher = vscode.workspace.createFileSystemWatcher(
 		'**/.vscode/searchlight-reviews/**/comments.json',
 	);
-	const onChange = () => {
-		refreshAll();
+	const refreshReviews = (uri: vscode.Uri, reason: string): void => {
+		conversationDocuments.refresh(uri);
+		void active.reloadReview().then(() => refreshAll(reason)).catch((error) => {
+			log(`Could not refresh saved reviews: ${errMessage(error)}`);
+		});
 	};
-	watcher.onDidCreate(onChange);
-	watcher.onDidChange(onChange);
-	watcher.onDidDelete(onChange);
+	watcher.onDidCreate((uri) => refreshReviews(uri, 'review-created'));
+	watcher.onDidChange((uri) => refreshReviews(uri, 'review-changed'));
+	watcher.onDidDelete((uri) => refreshReviews(uri, 'review-deleted'));
 	context.subscriptions.push(watcher);
 
-	// Activation critical path ends here — return fast. The heavy, AV-scanned git work (repo-root
-	// resolution, default base/compare, resolve, first refresh) runs in the background so VS Code
-	// stops showing "Activating Extensions..." within milliseconds. The four views keep their
-	// existing loading/placeholder state until the background init calls refreshAll().
+	// Early startup enables inline discussions and usage observation only. This initializer is
+	// invoked later by a pane, comparison command, or new-thread submission, never just by activation.
 	perf('activate total', tActivate);
 
-	void (async () => {
-		const tBg = Date.now();
+	initializeComparison = () => trace('startup.background', async () => {
+		const tBg = now();
 
-		const tRepo = Date.now();
-		const repoRoot = (await getRepoRoot(wsFolder)) ?? wsFolder;
+		const tRepo = now();
+		const detectedRoot = await trace('startup.repoRoot', () => getRepoRoot(wsFolder));
+		const repoRoot = detectedRoot ?? wsFolder;
+		event('startup.repoRootResult', { fallback: !detectedRoot });
 		perf('getRepoRoot', tRepo);
 		active.repoRootFsPath = repoRoot;
 
@@ -499,14 +670,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			.getConfiguration('searchlight')
 			.get<boolean>('autoCreateOnEmpty', true);
 		if (autoCreateOnEmpty) {
-			const tDefaults = Date.now();
+			const tDefaults = now();
 			await active.computeDefaults();
 			perf('computeDefaults', tDefaults);
 		}
-		const tResolve = Date.now();
+		const tResolve = now();
 		await active.resolve();
 		perf('resolve', tResolve);
-		refreshAll();
+		setComparisonSettled();
+		milestone('startup.comparisonResolved', { outcome: active.baselineError ? 'error' : active.baselineCommit ? 'ready' : 'unselected' });
+		refreshAll('startup');
 
 		// Watch for branch switches. Nothing else observes `git checkout`, so without this the panes
 		// keep showing whatever branch was current at activation. Debounced because git fires several
@@ -515,7 +688,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		// state — neither touches git, so this cannot loop).
 		let headTimer: NodeJS.Timeout | undefined;
 		let inFlight = false;
-		const onHeadChanged = (): void => {
+		const onHeadChanged = (reason = 'git-api-state'): void => {
+			if (reason === 'ref-changed' || reason === 'ref-created' || reason === 'ref-deleted') {
+				comparisonProvider.invalidateBranches();
+			}
+			event('refs.refreshRequested', { reason, coalesced: !!headTimer, inFlight });
 			if (headTimer) {
 				clearTimeout(headTimer);
 			}
@@ -523,14 +700,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				headTimer = undefined;
 				if (inFlight) {
 					// A ref update during resolution must trigger another pass, not be dropped.
-					onHeadChanged();
+					onHeadChanged('retry-in-flight');
 					return;
 				}
 				inFlight = true;
 				void (async () => {
 					try {
 						await active.resolve();
-						refreshAll();
+						refreshAll(reason);
 					} finally {
 						inFlight = false;
 					}
@@ -538,7 +715,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}, 250);
 		};
 
-		const repoSub = await gitApi.onRepoStateChanged(repoRoot, onHeadChanged);
+		const repoSub = await trace('startup.gitSubscription', () =>
+			gitApi.onRepoStateChanged(repoRoot, onHeadChanged, () => comparisonProvider.invalidateBranches()));
 		if (repoSub) {
 			context.subscriptions.push(repoSub);
 		}
@@ -564,9 +742,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			];
 			for (const pattern of patterns) {
 				const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-				watcher.onDidChange(onHeadChanged);
-				watcher.onDidCreate(onHeadChanged);
-				watcher.onDidDelete(onHeadChanged);
+				watcher.onDidChange(() => onHeadChanged('ref-changed'));
+				watcher.onDidCreate(() => onHeadChanged('ref-created'));
+				watcher.onDidDelete(() => onHeadChanged('ref-deleted'));
 				context.subscriptions.push(watcher);
 			}
 		} catch (error) {
@@ -575,11 +753,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 
 		perf('background init total', tBg);
-	})();
+		milestone('startup.backgroundComplete');
+	});
+	event('startup.comparisonDeferred');
+	milestone('activation.return');
 }
 
 export function deactivate(): void {
-	// Nothing to clean up; all disposables are tracked in context.subscriptions.
+	emitUsageSummary();
 }
 
 /**

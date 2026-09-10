@@ -19,6 +19,11 @@ review thread to the `copilot` CLI so an agent can reply in-thread and stamp its
 | [data-model.md](data-model.md) | On-disk layout (`registry.json` + `comments.json`), the v2 schema, v1 back-compat rules, the tag set, durable `seqCounter`, `reviewedFiles` |
 | [engineering.md](engineering.md) | Prerequisites, build/package/deploy commands, VM verification (Hyperloop + PrintWindow), the no-shell git helpers, commit conventions, known constraints |
 
+For startup performance work, see [Startup diagnostics](startup-diagnostics.md): capture/export
+workflow, readiness milestones, dependency spans, timing semantics and limitations.
+For feature adoption and Source Control/discussion workflows, see
+[Local feature usage](usage-diagnostics.md).
+
 ## 30-second orientation
 
 - **One extension, two owners.** The extension owns the UI and *writes* `comments.json`. An

@@ -6,7 +6,8 @@
  *     a comment/check glyph, and resolved→collapsed / open→expanded default,
  *   - nested comment rows (`author: first line`), timestamp (+ model/version for agents) description,
  *     and an author glyph (hubot/account),
- *   - click a thread/comment row → `searchlight.openThreadLocation` (jump to file:line),
+ *   - click a thread/comment row -> jump to code; Read opens the file-independent conversation,
+ *   - a separate Code button -> `searchlight.openThreadLocation` (jump to file:line),
  *   - inline resolve / unresolve button per thread → `searchlight.resolveThreadNode` /
  *     `searchlight.unresolveThreadNode` (the native inline `view/item/context` menus don't apply to
  *     a webview, so the row button replaces them).
@@ -14,9 +15,8 @@
  * Parity-PLUS: per-comment `#tag` badges (from `comment.tags`) are rendered here even though the
  * native TreeView did not surface them (explicitly requested for Phase E).
  *
- * Metrics parity: keeps `conversations.build` (host-side, this file — a pure in-memory thread map,
- * ~0ms) intact and adds `conversations.render` + `conversations.firstPaint` via the shared webview
- * metrics protocol.
+ * Metrics: `conversations.build` includes thread mapping and anchor reads, with per-anchor spans;
+ * correlated DOM/content readiness is reported via the shared webview metrics protocol.
  *
  * This module NEVER calls a language model.
  */
@@ -25,7 +25,9 @@ import * as vscode from 'vscode';
 import { ActiveComparison } from './activeComparison';
 import { authorDisplay, formatTimestamp, relocateAnchor, ReviewComment, ReviewThread } from './reviewModel';
 import { webviewHtml, getNonce } from './webviewShell';
-import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
+import { logBuild, PaneMetrics } from './webviewMetrics';
+import { now, trace } from './diagnostics';
+import { ConversationTarget, conversationTarget } from './conversationModel';
 
 /** A comment row in the serializable payload sent to the webview. */
 interface WireComment {
@@ -38,6 +40,7 @@ interface WireComment {
 
 /** A thread row in the serializable payload sent to the webview. */
 interface WireThread {
+	target: ConversationTarget;
 	num: string; // seq (or index+1), zero-padded to 2 digits
 	loc: string; // `filePath:line` or '(no file)'
 	desc: string; // state + #tags text (mirrors the native description)
@@ -53,6 +56,7 @@ interface WireThread {
 
 type IncomingMessage =
 	| { type: 'ready' }
+	| { type: 'viewConversation'; target: ConversationTarget }
 	| { type: 'navigate'; filePath: string; startLine: number; endLine: number }
 	| { type: 'resolve'; threadId: string }
 	| { type: 'unresolve'; threadId: string }
@@ -82,7 +86,9 @@ export async function syncResolvedContext(workspaceState: vscode.Memento): Promi
 }
 
 export class ConversationsWebviewProvider implements vscode.WebviewViewProvider {
+	private readonly metrics = new PaneMetrics('conversations');
 	private view?: vscode.WebviewView;
+	private stateVersion = 0;
 
 	constructor(
 		private readonly getActive: () => ActiveComparison | undefined,
@@ -91,13 +97,16 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
-		const tResolve = Date.now();
+		this.metrics.bind(webviewView);
 		webviewView.webview.options = { enableScripts: true };
 		webviewView.webview.html = this.html(webviewView.webview);
 		webviewView.webview.onDidReceiveMessage(async (msg: IncomingMessage) => {
 			switch (msg.type) {
 				case 'ready':
-					await this.postState();
+					await this.postState('client-ready');
+					break;
+				case 'viewConversation':
+					await vscode.commands.executeCommand('searchlight.viewConversation', msg.target);
 					break;
 				case 'navigate':
 					if (msg.filePath) {
@@ -125,14 +134,10 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 					}
 					break;
 				default:
-					if (isRenderedMessage(msg)) {
-						logRendered(msg);
-						logFirstPaint('conversations', tResolve);
-					}
 					break;
 			}
 		});
-		void this.postState();
+		void this.postState('view-resolve');
 	}
 
 	/** External refresh (called by refreshAll and the Files→Conversations refresh hook). */
@@ -152,7 +157,12 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 	}
 
 	/** Build the current thread list and push it to the webview (mirrors conversationsView getChildren). */
-	private async postState(): Promise<void> {
+	private async postState(reason = 'refresh-or-action'): Promise<void> {
+		const version = ++this.stateVersion;
+		return this.metrics.build(() => this.buildState(version), reason);
+	}
+
+	private async buildState(version: number): Promise<void> {
 		if (!this.view) {
 			return;
 		}
@@ -160,20 +170,21 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 		const review = active?.review;
 		const hideResolved = isResolvedHidden(this.workspaceState);
 		if (!review) {
-			this.view.webview.postMessage({ type: 'state', threads: null, hideResolved });
+			this.metrics.post({ type: 'state', threads: null, error: active?.baselineError, hideResolved });
 			return;
 		}
 
-		// Root build — pure in-memory thread map (no git op), so ms is expected to be ~0.
-		const tBuild = Date.now();
+		// Root build includes anchor reads; per-anchor spans separate that work from mapping.
+		const tBuild = now();
 		// Per-postState cache so multiple threads in the same file read it once.
 		const lineCache = new Map<string, string[] | null>();
 		const wire: WireThread[] = [];
 		for (let i = 0; i < review.threads.length; i++) {
-			wire.push(await this.toWireThread(review.threads[i], i, lineCache));
+			wire.push(await trace('conversations.anchor', () => this.toWireThread(review.threads[i], i, lineCache, review.sourceFile)));
 		}
+		if (version !== this.stateVersion || this.getActive()?.review !== review) { return; }
 		logBuild('conversations', tBuild, wire.length, wire);
-		this.view.webview.postMessage({ type: 'state', threads: wire, hideResolved });
+		this.metrics.post({ type: 'state', threads: wire, error: active?.baselineError, hideResolved });
 	}
 
 	/**
@@ -206,6 +217,7 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 		thread: ReviewThread,
 		index: number,
 		lineCache: Map<string, string[] | null>,
+		reviewFile: string,
 	): Promise<WireThread> {
 		const num = String(thread.seq ?? index + 1).padStart(2, '0');
 		const resolved = thread.state === 'resolved';
@@ -245,6 +257,7 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 		const loc = thread.filePath ? `${thread.filePath}:${navStart}` : '(no file)';
 
 		return {
+			target: conversationTarget(reviewFile, thread, index),
 			num,
 			loc,
 			desc: bits.join('  '),
@@ -350,10 +363,16 @@ const CONVERSATIONS_CSS = `
 .children { display: block; }
 .thread.collapsed > .children { display: none; }
 .crow { padding-left: 20px; color: var(--vscode-foreground); }
-/* Drifted (uncommitted anchor moved/vanished) threads: dim the thread + its comments. */
-.thread.drifted > .row .label,
-.thread.drifted > .row .desc,
-.thread.drifted > .children { opacity: 0.6; }
+.read-action, .code-action {
+	flex: 0 0 auto;
+	border: none;
+	background: transparent;
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+}
+.read-action:focus-visible, .code-action:focus-visible, .crow:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+}
 .drift-badge {
 	margin-left: 6px;
 	flex: 0 0 auto;
@@ -383,6 +402,19 @@ let threads = null;                 // WireThread[] | null
 let hideResolved = false;           // host-authoritative toggle state (restored from state payload)
 const threadOpen = new Map();       // thread key → bool (user override of default open state)
 
+function readConversation(t) {
+	vscode.postMessage({ type: 'viewConversation', target: t.target });
+}
+
+function openDefault(t) {
+	// ASSUMPTION: normal browsing should navigate to code; Read remains available if it is gone.
+	if (t.hasFile) {
+		vscode.postMessage({ type: 'navigate', filePath: t.filePath, startLine: t.navStart, endLine: t.navEnd });
+	} else {
+		readConversation(t);
+	}
+}
+
 function renderComment(c, t) {
 	const row = document.createElement('div');
 	row.className = 'row crow';
@@ -402,12 +434,13 @@ function renderComment(c, t) {
 		b.textContent = '#' + tag;
 		tagsEl.appendChild(b);
 	}
-	if (t.hasFile) {
-		row.addEventListener('click', (e) => {
-			e.stopPropagation();
-			vscode.postMessage({ type: 'navigate', filePath: t.filePath, startLine: t.navStart, endLine: t.navEnd });
-		});
-	}
+	row.title = t.hasFile ? 'Open code' : 'Read full conversation';
+	row.tabIndex = 0;
+	row.setAttribute('role', 'button');
+	row.addEventListener('click', (e) => { e.stopPropagation(); openDefault(t); });
+	row.addEventListener('keydown', (e) => {
+		if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDefault(t); }
+	});
 	return row;
 }
 
@@ -427,20 +460,25 @@ function renderThread(t) {
 	const actionHtml = t.threadId
 		? '<span class="action" title="' + actionTitle + '">' + actionSvg + '</span>'
 		: '';
-	const driftHtml = t.drift
-		? '<span class="drift-badge" title="This comment is anchored to an uncommitted change and may move or be lost as the working tree changes.">uncommitted — may drift</span>'
-		: '';
+	const driftHtml = t.drift === 'orphaned'
+		? '<span class="drift-badge" title="The saved code anchor cannot be found or read. The conversation is still available.">anchor unavailable</span>'
+		: t.drift === 'relocated'
+			? '<span class="drift-badge" title="The saved code anchor is now on a different line.">code moved</span>'
+			: '';
 	row.innerHTML =
 		'<span class="twisty">' + CHEVRON_SVG + '</span>' +
 		'<span class="glyph">' + glyph + '</span>' +
 		'<span class="label"></span>' +
 		'<span class="desc"></span>' +
 		driftHtml +
+		'<button class="read-action" title="Read full conversation">Read</button>' +
+		(t.hasFile ? '<button class="code-action" title="Open code at the recorded location (if still available)">Code</button>' : '') +
 		actionHtml;
 	row.querySelector('.label').textContent = 'Thread #' + t.num + '  ·  ' + t.loc;
 	row.querySelector('.desc').textContent = t.desc;
 	row.querySelector('.twisty').addEventListener('click', (e) => {
 		e.stopPropagation();
+		vscode.postMessage({ type: 'usageAction', action: 'toggleThread' });
 		threadOpen.set(key, !open);
 		paint();
 	});
@@ -451,9 +489,17 @@ function renderThread(t) {
 			vscode.postMessage({ type: actionType, threadId: t.threadId });
 		});
 	}
-	if (t.hasFile) {
-		row.addEventListener('click', () => {
-			vscode.postMessage({ type: 'navigate', filePath: t.filePath, startLine: t.navStart, endLine: t.navEnd });
+	row.title = t.hasFile ? 'Open code' : 'Read full conversation';
+	row.addEventListener('click', () => openDefault(t));
+	row.querySelector('.read-action').addEventListener('click', (e) => {
+		e.stopPropagation();
+		readConversation(t);
+	});
+	const code = row.querySelector('.code-action');
+	if (code) {
+		code.addEventListener('click', (e) => {
+			e.stopPropagation();
+			openDefault(t);
 		});
 	}
 	el.appendChild(row);

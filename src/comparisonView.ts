@@ -8,9 +8,13 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ActiveComparison } from './activeComparison';
-import { aheadBehind, listWorktreesCli } from './git';
+import { aheadBehind, BranchRef, listWorktreesCli } from './git';
 import * as gitApi from './gitApi';
+import { PaneMetrics } from './webviewMetrics';
+import { renderMetricsScript } from './webviewShell';
+import { event, trace } from './diagnostics';
 
 /** A stale row is `behind` its `upstream` (only sent when behind > 0). */
 interface Staleness {
@@ -28,9 +32,14 @@ interface BranchItem {
 type Row = 'base' | 'compare';
 
 export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
+	private readonly metrics = new PaneMetrics('comparison');
 	static readonly viewType = 'searchlight.comparison';
 
 	private view?: vscode.WebviewView;
+	private stateVersion = 0;
+	private catalogGeneration = 0;
+	private catalog?: { cwd: string; refs: BranchRef[] };
+	private catalogLoad?: { cwd: string; generation: number; promise: Promise<BranchRef[]> };
 
 	constructor(
 		private readonly getActive: () => ActiveComparison | undefined,
@@ -41,8 +50,55 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 	) {}
 
 	/** Kept named `refresh` so the extension's `refreshAll` closure is unchanged. */
-	refresh(): void {
+	refresh(reloadBranches = false): void {
+		if (reloadBranches) { this.invalidateBranches(); }
 		void this.postState();
+	}
+
+	invalidateBranches(): void {
+		this.catalogGeneration++;
+		this.catalog = undefined;
+		this.stateVersion++;
+		event('comparison.catalogInvalidated');
+	}
+
+	private repoKey(cwd: string): string {
+		const resolved = path.resolve(cwd);
+		// VS Code uses native paths while git prints forward slashes; Windows casing is immaterial.
+		return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	}
+
+	private async loadBranches(cwd: string): Promise<BranchRef[]> {
+		const key = this.repoKey(cwd);
+		if (this.catalog?.cwd === key) {
+			event('comparison.catalogCache', { outcome: 'hit' });
+			return this.catalog.refs;
+		}
+		let load = this.catalogLoad;
+		if (!load || load.cwd !== key) {
+			event('comparison.catalogCache', { outcome: 'miss' });
+			load = { cwd: key, generation: this.catalogGeneration, promise: gitApi.listBranches(cwd) };
+			this.catalogLoad = load;
+		} else {
+			event('comparison.catalogCache', { outcome: 'join' });
+		}
+		let refs: BranchRef[];
+		try {
+			refs = await load.promise;
+		} finally {
+			if (this.catalogLoad === load) { this.catalogLoad = undefined; }
+		}
+		// ASSUMPTION: ref changes during enumeration invalidate its result. Wait for that query
+		// to finish before starting one replacement, rather than overlapping expensive git scans.
+		if (load.generation !== this.catalogGeneration) {
+			return this.loadBranches(cwd);
+		}
+		// Empty results can be transient CLI fallbacks; never retain them across later refreshes.
+		const current = this.getActive();
+		if (refs.length > 0 && current && key === this.repoKey(current.repoRootFsPath)) {
+			this.catalog = { cwd: key, refs };
+		}
+		return refs;
 	}
 
 	/** Copy the COMPARE (source) branch name to the clipboard. */
@@ -87,14 +143,19 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 	}
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
+		this.stateVersion++;
 		this.view = webviewView;
+		this.metrics.bind(webviewView);
 		webviewView.webview.options = { enableScripts: true };
 		webviewView.webview.html = this.html();
 		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; branch?: string; row?: string }) => {
 			switch (msg.type) {
 				case 'ready':
+					await this.postState(msg.type);
+					break;
 				case 'refreshBranches':
-					await this.postState();
+					this.invalidateBranches();
+					await this.postState(msg.type);
 					break;
 				case 'selectBase':
 					if (msg.branch) {
@@ -120,7 +181,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 					break;
 			}
 		});
-		void this.postState();
+		void this.postState('view-resolve');
 	}
 
 	/** Ahead/behind staleness for a local branch (skipped for remote-tracking refs / no upstream). */
@@ -135,17 +196,31 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 		return { behind: ab.behind, upstream: ab.upstream };
 	}
 
-	private async postState(): Promise<void> {
+	private async postState(reason = 'refresh-or-action'): Promise<void> {
+		const version = ++this.stateVersion;
+		return this.metrics.build(() => this.buildState(version), reason);
+	}
+
+	private async buildState(version: number): Promise<void> {
 		if (!this.view) {
 			return;
 		}
 		const active = this.getActive();
 		if (!active) {
-			void this.view.webview.postMessage({ type: 'state', branches: [], base: null, compare: null });
+			this.metrics.post({ type: 'state', branches: [], base: null, compare: null });
 			return;
 		}
 		const cwd = active.repoRootFsPath;
-		const [branchRefs, head] = await Promise.all([gitApi.listBranches(cwd), gitApi.getHead(cwd)]);
+		const comparisonKey = active.comparisonKey;
+		const [branchRefs, head] = await trace('comparison.branches', () =>
+			Promise.all([this.loadBranches(cwd), gitApi.getHead(cwd)]));
+		const overtaken = () => version !== this.stateVersion || active !== this.getActive() ||
+			cwd !== active.repoRootFsPath || comparisonKey !== active.comparisonKey;
+		if (overtaken()) {
+			event('comparison.stateDiscarded', { phase: 'branches' });
+			return;
+		}
+		event('comparison.branchCount', { count: branchRefs.length });
 		const headBranch = head.detached ? undefined : head.branch;
 		const branches: BranchItem[] = branchRefs
 			.map((b) => ({
@@ -161,14 +236,18 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 				return a.name.localeCompare(b.name);
 			});
 
-		const [baseStale, compareStale] = await Promise.all([
+		const [baseStale, compareStale] = await trace('comparison.staleness', () => Promise.all([
 			this.staleness(cwd, active.base),
 			this.staleness(cwd, active.compare),
-		]);
+		]));
+		if (overtaken()) {
+			event('comparison.stateDiscarded', { phase: 'staleness' });
+			return;
+		}
 
 		const base = active.base ?? null;
 		const compare = active.compare ?? null;
-		void this.view.webview.postMessage({
+		this.metrics.post({
 			type: 'state',
 			branches,
 			base,
@@ -359,6 +438,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 
 <script>
   const vscode = acquireVsCodeApi();
+  ${renderMetricsScript()}
   let branches = [];
   let selected = { base: null, compare: null };
   let headBranch = null;
@@ -438,7 +518,11 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 
   for (const row of ['base', 'compare']) {
     inputs[row].addEventListener('input', () => { activeIndex[row] = 0; renderDropdown(row); });
-    inputs[row].addEventListener('focus', () => { activeIndex[row] = -1; renderDropdown(row); });
+    inputs[row].addEventListener('focus', () => {
+      vscode.postMessage({ type: 'usageAction', action: 'openBranchPicker' });
+      activeIndex[row] = -1;
+      renderDropdown(row);
+    });
     inputs[row].addEventListener('blur', () => {
       setTimeout(() => dropdowns[row].classList.remove('open'), 150);
     });
@@ -543,6 +627,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (state.type !== 'state') { return; }
+    const t0 = performance.now();
     branches = state.branches || [];
     selected.base = state.base;
     selected.compare = state.compare;
@@ -553,6 +638,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
     applyStale('base', state.baseStale);
     applyStale('compare', state.compareStale);
     renderStatus(state);
+    reportRendered('comparison', branches.length, t0);
   });
 
   vscode.postMessage({ type: 'ready' });

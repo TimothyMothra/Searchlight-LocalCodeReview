@@ -53,7 +53,8 @@ code --list-extensions --show-versions | Select-String searchlight
 
 - `publisher`: `TimothyMothra`; `repository.url`:
   `https://github.com/TimothyMothra/Searchlight-LocalCodeReview.git`.
-- `activationEvents`: `["workspaceContains:.vscode/searchlight-reviews/**/comments.json"]`.
+- `activationEvents`: `onStartupFinished` plus
+  `workspaceContains:.vscode/searchlight-reviews/**/comments.json`.
 - `capabilities.untrustedWorkspaces.supported`: `true` (works in Restricted Mode).
 - **~40 commands** and four views under the `searchlight` container.
 - Comparison title-bar order: `copyCompareBranch@1` · `copyComparePath@2` · `openTerminal@3` ·
@@ -69,6 +70,7 @@ code --list-extensions --show-versions | Select-String searchlight
 | `searchlight.defaultRemote` | — | preferred remote for branch listing |
 | `searchlight.autoCreateOnEmpty` | — | auto-create a review when none exists |
 | `searchlight.perfLogging` | — | verbose `[perf]` timings to the OUTPUT channel |
+| `searchlight.usageLogging` | `true` | local `[usage]` actions/exposure summaries; no remote telemetry |
 | `searchlight.deferThreadsOnLoad` | — | defer CommentController render for faster first paint |
 
 ## 5. Performance notes
@@ -83,7 +85,9 @@ code --list-extensions --show-versions | Select-String searchlight
 - **Memoized comparison.** `changedFiles` / `logRange` results are cached keyed by the effective
   baseline/compare commit pair, so changing an upstream or pin invalidates the right results.
 - Turn on `searchlight.perfLogging` and watch the **Searchlight** OUTPUT channel to see `[perf]`
-  timings.
+  structured timings. **Searchlight: Export Startup Diagnostics** saves the bounded trace,
+  milestones, aggregates and outstanding operations to JSON. See
+  [Startup diagnostics](startup-diagnostics.md) for the capture protocol and interpretation.
 
 ## 6. VM verification (Hyperloop)
 
@@ -121,7 +125,19 @@ No runtime dependencies — nothing ships in the VSIX beyond the compiled `out/`
 
 ## 10. Comparison regression coverage
 
-`npm test` compiles and runs `scripts/comparison.test.cjs` with Node's built-in test runner.
+`npm test` compiles and runs `scripts/comparison.test.cjs` and `scripts/diagnostics.test.cjs` with
+Node's built-in test runner, plus `usage.test.cjs` and `usage-integration.test.cjs`.
+Diagnostic tests cover span correlation, failures, bounded retention,
+logging controls, pane readiness and the webview acknowledgement protocol.
+Comparison tests also cover branch-query coalescing, namespace batching, catalog invalidation,
+cross-repository isolation, path normalization and stale-state suppression.
+Usage tests cover privacy filtering, action counts versus exposure, focused-time accounting,
+editor classification, early inline discussions and shared on-demand comparison initialization.
+`conversation.test.cjs` covers full transcript rendering, deleted/uncommitted-file independence,
+live reply updates, legacy identity, workspace-scoped references and separate Read/Code actions.
+`review-discovery.test.cjs` covers targeted multi-root/nested scans, absent stores, permission
+failures, in-flight sharing and linked-directory cycle avoidance. Branch tests cover large
+unambiguous catalogs, batched shortening exceptions and older Git capability fallback.
 The read-only Git-query fixtures cover advancing/stale target refs, rebases, stacked targets,
 explicit remote selection, ambiguous ancestry, pin persistence/reset/invalidation, and consistent
 baseline endpoints across file lists, commits and diff editors. They do not modify any Git refs,

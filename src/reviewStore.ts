@@ -14,9 +14,67 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Review, ReviewAuthor, ReviewComment, ReviewThread, parseReview, normalizeSeq } from './reviewModel';
+import { event, trace } from './diagnostics';
 
 /** Glob (relative to each workspace folder) for Searchlight review storage. */
 export const REVIEWS_GLOB = '.vscode/searchlight-reviews/**/comments.json';
+
+const discoveryInFlight = new Map<string, Promise<vscode.Uri[]>>();
+
+function isMissing(error: unknown): boolean {
+	return typeof error === 'object' && error !== null && 'code' in error &&
+		(error.code === 'FileNotFound' || error.code === 'ENOENT');
+}
+
+function discoverReviews(folder: vscode.Uri): Promise<vscode.Uri[]> {
+	const root = vscode.Uri.joinPath(folder, '.vscode', 'searchlight-reviews');
+	const key = root.toString();
+	const existing = discoveryInFlight.get(key);
+	if (existing) {
+		event('reviews.discoveryCache', { outcome: 'join' });
+		return trace('reviews.discoverWait', () => existing);
+	}
+	event('reviews.discoveryCache', { outcome: 'miss' });
+	const pending = trace('reviews.discover', async () => {
+		const files: vscode.Uri[] = [];
+		const directories = [root];
+		let directoryCount = 0;
+		let skippedLinks = 0;
+		while (directories.length) {
+			const directory = directories.pop()!;
+			let entries: [string, vscode.FileType][];
+			try {
+				entries = await trace('reviews.readDirectory', async () => vscode.workspace.fs.readDirectory(directory));
+			} catch (error) {
+				if (!isMissing(error)) { throw error; }
+				event('reviews.directoryMissing');
+				continue;
+			}
+			directoryCount++;
+			for (const [name, type] of entries) {
+				// ASSUMPTION: review storage contains ordinary directories. Do not follow linked
+				// directories out of this small subtree or into cycles; report any skipped links.
+				if ((type & vscode.FileType.SymbolicLink) && !(type & vscode.FileType.File)) {
+					skippedLinks++;
+					continue;
+				}
+				const uri = vscode.Uri.joinPath(directory, name);
+				if (type & vscode.FileType.Directory) {
+					directories.push(uri);
+				} else if ((type & vscode.FileType.File) &&
+					(process.platform === 'win32' ? name.toLowerCase() : name) === 'comments.json') {
+					files.push(uri);
+				}
+			}
+		}
+		event('reviews.discovered', { fileCount: files.length, directoryCount, skippedLinks });
+		return files;
+	}).finally(() => {
+		if (discoveryInFlight.get(key) === pending) { discoveryInFlight.delete(key); }
+	});
+	discoveryInFlight.set(key, pending);
+	return pending;
+}
 
 /** A short, unique-enough id for a new comment/thread (no external uuid dependency). */
 export function newId(prefix: string): string {
@@ -26,31 +84,56 @@ export function newId(prefix: string): string {
 
 /** Find + parse every review file across all workspace folders (stable-sorted by path). */
 export async function scanReviews(): Promise<Review[]> {
-	const folders = vscode.workspace.workspaceFolders ?? [];
-	const found: Review[] = [];
-	for (const folder of folders) {
-		const pattern = new vscode.RelativePattern(folder, REVIEWS_GLOB);
-		const uris = await vscode.workspace.findFiles(pattern);
-		for (const uri of uris) {
-			const review = await loadReview(uri);
-			if (review) {
-				found.push(review);
+	return trace('reviews.scan', async () => {
+		const folders = vscode.workspace.workspaceFolders ?? [];
+		const found: Review[] = [];
+		let fileCount = 0;
+		event('reviews.scanStarted', { folderCount: folders.length });
+		for (const folder of folders) {
+			const uris = await discoverReviews(folder.uri);
+			fileCount += uris.length;
+			for (const uri of uris) {
+				const review = await loadReview(uri);
+				if (review) {
+					found.push(review);
+				}
 			}
 		}
-	}
-	found.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
-	return found;
+		found.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
+		event('reviews.scanResult', { fileCount, reviewCount: found.length, skippedCount: fileCount - found.length });
+		return found;
+	});
 }
 
 /** Read + parse a comments.json file into a Review, or undefined if missing/invalid. */
 export async function loadReview(uri: vscode.Uri): Promise<Review | undefined> {
-	try {
-		const bytes = await vscode.workspace.fs.readFile(uri);
-		const text = Buffer.from(bytes).toString('utf8');
-		return parseReview(text, uri.fsPath);
-	} catch {
-		return undefined;
-	}
+	return trace('reviews.load', async () => {
+		let phase = 'read';
+		try {
+			const bytes = await trace('reviews.read', async () => vscode.workspace.fs.readFile(uri));
+			phase = 'parse';
+			return await trace('reviews.parse', async () => {
+				const text = Buffer.from(bytes).toString('utf8');
+				const review = parseReview(text, uri.fsPath);
+				// ASSUMPTION: the tolerant parser reports invalid input as undefined; do not reparse
+				// or log content/paths just to distinguish those results from filesystem failures.
+				event('reviews.loadResult', {
+					outcome: review ? 'loaded' : 'invalidParse',
+					byteCount: bytes.byteLength,
+					threadCount: review?.threads.length,
+					commentCount: review?.threads.reduce((count, thread) => count + thread.comments.length, 0),
+				});
+				return review;
+			});
+		} catch (error) {
+			const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+			event('reviews.loadResult', {
+				outcome: phase === 'read' && (code === 'FileNotFound' || code === 'ENOENT') ? 'missing' : 'error',
+				phase,
+			});
+			return undefined;
+		}
+	});
 }
 
 // ── Serialization (always emits v2) ─────────────────────────────────────────

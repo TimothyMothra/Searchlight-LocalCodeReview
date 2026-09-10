@@ -24,7 +24,8 @@ import { ActiveComparison } from './activeComparison';
 import { ReviewStatusBar } from './statusBar';
 import * as store from './reviewStore';
 import { webviewHtml, getNonce } from './webviewShell';
-import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
+import { logBuild, PaneMetrics } from './webviewMetrics';
+import { event, now, trace } from './diagnostics';
 import { ChangedFile, UncommittedChanges, changedFilesUncommitted } from './git';
 import { DIFF_SCHEME } from './reviewDiff';
 
@@ -96,6 +97,7 @@ export async function syncUncommittedContext(workspaceState: vscode.Memento): Pr
 }
 
 export class FilesWebviewProvider implements vscode.WebviewViewProvider {
+	private readonly metrics = new PaneMetrics('files');
 	private view?: vscode.WebviewView;
 	private filesExpanded = false;
 
@@ -116,13 +118,13 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
-		const tResolve = Date.now();
+		this.metrics.bind(webviewView);
 		webviewView.webview.options = { enableScripts: true };
 		webviewView.webview.html = this.html(webviewView.webview);
 		webviewView.webview.onDidReceiveMessage(async (msg: IncomingMessage) => {
 			switch (msg.type) {
 				case 'ready':
-					await this.postState();
+					await this.postState('client-ready');
 					break;
 				case 'toggleReviewed':
 					if (msg.relPath) {
@@ -152,14 +154,10 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 					}
 					break;
 				default:
-					if (isRenderedMessage(msg)) {
-						logRendered(msg);
-						logFirstPaint('files', tResolve);
-					}
 					break;
 			}
 		});
-		void this.postState();
+		void this.postState('view-resolve');
 	}
 
 	/** External refresh (called by refreshAll / after a checkbox toggle). */
@@ -260,14 +258,18 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	}
 
 	/** Build the current tree and push it to the webview (mirrors filesView.ts getChildren). */
-	private async postState(): Promise<void> {
+	private async postState(reason = 'refresh-or-action'): Promise<void> {
+		return this.metrics.build(() => this.buildState(), reason);
+	}
+
+	private async buildState(): Promise<void> {
 		if (!this.view) {
 			return;
 		}
 		const hideUncommitted = isUncommittedHidden(this.workspaceState);
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare || !active.baselineCommit) {
-			this.view.webview.postMessage({ type: 'state', tree: null, error: active?.baselineError, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
+			this.metrics.post({ type: 'state', tree: null, error: active?.baselineError, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
 			return;
 		}
 
@@ -293,7 +295,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 				this.loadUncommitted(active),
 			]);
 			if (active.comparisonKey !== key) { return; }
-			const tBuildCum = Date.now();
+			const tBuildCum = now();
 			const rows = cumulativeFiles(cum, uc, active.review?.reviewedFiles ?? []);
 			const ucTotalCum = rows.reduce((n, f) => (f.uncommitted ? n + 1 : n), 0);
 			// In cumulative mode a row is one merged diff, so "uncommitted" is no longer a row KIND —
@@ -305,7 +307,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 				compactTree(treeCum);
 			}
 			logBuild('files', tBuildCum, visibleCum.length, treeCum);
-			this.view.webview.postMessage({
+			this.metrics.post({
 				type: 'state',
 				tree: treeCum,
 				expanded: this.filesExpanded,
@@ -328,13 +330,14 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 						this.paths = files;
 						this.loadedKey = key;
 						this.loadingKey = undefined;
-						void this.postState();
+						void this.postState('data-loaded');
 					})
 					.catch(() => {
 						this.loadingKey = undefined;
+						event('files.loadFailed', { fallback: 'loading-placeholder' });
 					});
 			}
-			this.view.webview.postMessage({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
+			this.metrics.post({ type: 'state', loading: true, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
 			return;
 		}
 
@@ -342,7 +345,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		// base...compare pair — load it fresh on every render so edits appear without a key change.
 		const uc = await this.loadUncommitted(active);
 		if (active.comparisonKey !== key) { return; }
-		const tBuild = Date.now();
+		const tBuild = now();
 		const merged = mergeFiles(this.paths, uc, active.review?.reviewedFiles ?? []);
 		const ucTotal = merged.reduce((n, f) => (f.uncommitted ? n + 1 : n), 0);
 		// When hidden, drop uncommitted leaves entirely (folders that become empty simply aren't built).
@@ -361,7 +364,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		const count = visible.length;
 		logBuild('files', tBuild, count, tree);
 		const ucHidden = hideUncommitted ? ucTotal : 0;
-		this.view.webview.postMessage({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden, revealPath: this.revealPath, cumulative: false });
+		this.metrics.post({ type: 'state', tree, expanded: this.filesExpanded, hideUncommitted, ucHidden, revealPath: this.revealPath, cumulative: false });
 	}
 
 	/**
@@ -372,8 +375,9 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	 */
 	private async loadUncommitted(active: ActiveComparison): Promise<UncommittedChanges> {
 		try {
-			return await changedFilesUncommitted(active.repoRootFsPath);
+			return await trace('files.uncommitted', () => changedFilesUncommitted(active.repoRootFsPath));
 		} catch {
+			event('files.uncommittedFallback', { fallback: 'empty-groups' });
 			return { staged: [], unstaged: [], untracked: [] };
 		}
 	}
@@ -708,6 +712,7 @@ function renderDir(dir, depth) {
 			'<span class="label"></span>';
 		row.querySelector('.label').textContent = d.name;
 		row.addEventListener('click', () => {
+			vscode.postMessage({ type: 'usageAction', action: 'toggleFolder' });
 			materializeExpansion();
 			if (expanded.has(d.relPath)) { expanded.delete(d.relPath); }
 			else { expanded.add(d.relPath); }

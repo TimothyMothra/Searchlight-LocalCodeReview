@@ -17,6 +17,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "workspaceContains:.vscode/searchlight-reviews/**/comments.json"
   ],
   "main": "./out/extension.js",
@@ -82,6 +83,14 @@
       }
     ],
     "commands": [
+      {
+        "command": "searchlight.viewConversation",
+        "title": "Searchlight: Read Conversation"
+      },
+      {
+        "command": "searchlight.exportStartupDiagnostics",
+        "title": "Searchlight: Export Startup Diagnostics"
+      },
       {
         "command": "searchlight.refresh",
         "title": "Searchlight: Refresh Local Reviews",
@@ -313,7 +322,12 @@
         "searchlight.perfLogging": {
           "type": "boolean",
           "default": true,
-          "description": "When true, load-time timing lines are written to the Searchlight OUTPUT channel (prefixed [perf]) so you can see where time goes during activation and rendering."
+          "description": "Record correlated startup, Git, storage and pane-readiness timings in the Searchlight OUTPUT channel and a bounded in-memory trace. Use 'Searchlight: Export Startup Diagnostics' to save a JSON report. Enable before reloading for a complete startup capture."
+        },
+        "searchlight.usageLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically record local feature actions, pane exposure and editor-context usage in the Searchlight output log. No filenames, code, comments or remote telemetry are collected. Independent of performance logging."
         },
         "searchlight.deferThreadsOnLoad": {
           "type": "boolean",
@@ -448,6 +462,10 @@
       ],
       "commandPalette": [
         {
+          "command": "searchlight.viewConversation",
+          "when": "false"
+        },
+        {
           "command": "searchlight.createOrReply",
           "when": "false"
         },
@@ -497,7 +515,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "test": "npm run compile && node --test scripts/comparison.test.cjs",
+    "test": "npm run compile && node --test scripts/comparison.test.cjs scripts/diagnostics.test.cjs scripts/usage.test.cjs scripts/usage-integration.test.cjs scripts/conversation.test.cjs scripts/review-discovery.test.cjs",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {

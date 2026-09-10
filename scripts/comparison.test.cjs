@@ -191,7 +191,7 @@ function comparisonFixture() {
 	};
 	const { ActiveComparison } = loadCompiled('activeComparison', mocks);
 	const create = () => new ActiveComparison(repo, repo, state);
-	return { h, state, calls, gitApi, create, active: create() };
+	return { h, state, calls, gitApi, create, active: create(), reviewStore: mocks['./reviewStore'] };
 }
 
 test('pins persist across reloads, invalidate caches, reset to Auto, and stay scoped to a comparison', async () => {
@@ -325,6 +325,7 @@ test('Comparison renders baseline/error state and routes Pin and Auto controls',
 	const messages = [];
 	let receive;
 	new vm.Script(script).runInNewContext({
+		performance: { now: () => 0 },
 		acquireVsCodeApi: () => ({ postMessage: (message) => messages.push(message.type) }),
 		document: { getElementById: node, querySelector: node, activeElement: null },
 		window: { addEventListener: (_, handler) => { receive = handler; } },
@@ -345,4 +346,308 @@ test('Comparison renders baseline/error state and routes Pin and Auto controls',
 	assert.equal(node('auto-baseline').disabled, false);
 	node('auto-baseline').handlers.click();
 	assert.deepEqual(messages, ['ready', 'pinBaseline', 'autoBaseline']);
+});
+
+function deferred() {
+	let resolve, reject;
+	const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+	return { promise, resolve, reject };
+}
+
+test('review reload picks up external replies without overwriting a comparison selected during the read', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	f.reviewStore.loadReview = async () => ({ threads: [{ comments: [{ body: 'New Copilot response' }] }] });
+	await f.active.reloadReview();
+	assert.equal(f.active.review.threads[0].comments[0].body, 'New Copilot response');
+	const pending = deferred();
+	f.reviewStore.loadReview = () => pending.promise;
+	const reload = f.active.reloadReview();
+	f.active.sourceFile = 'another-review/comments.json';
+	const replacement = { threads: [] };
+	f.active.review = replacement;
+	pending.resolve({ threads: [{ comments: [{ body: 'Old comparison reply' }] }] });
+	await reload;
+	assert.equal(f.active.review, replacement);
+});
+
+function catalogFixture() {
+	const requests = [];
+	const states = [];
+	let staleQueries = 0;
+	let head = 'feature';
+	const active = { repoRootFsPath: 'repo-a', comparisonKey: 'pair-a', base: 'main', compare: 'feature', baselineCommit: A };
+	const gitApi = {
+		listBranches: (cwd) => {
+			const request = { cwd, ...deferred() };
+			requests.push(request);
+			return request.promise;
+		},
+		getHead: async () => ({ branch: head, detached: false }),
+	};
+	const { ComparisonWebviewProvider } = loadCompiled('comparisonView', {
+		vscode: {}, './gitApi': gitApi,
+		'./git': { aheadBehind: async () => { staleQueries++; return undefined; } },
+		'./webviewMetrics': {
+			PaneMetrics: class {
+				async build(work) { return work(); }
+				post(state) { states.push(state); }
+			},
+		},
+	});
+	const provider = new ComparisonWebviewProvider(() => active, () => {}, () => {}, () => {}, () => {});
+	provider.view = {};
+	return { provider, active, requests, states, gitApi, setHead: (value) => { head = value; }, staleQueries: () => staleQueries };
+}
+
+const branchCatalog = [
+	{ name: 'main', kind: 'local', commit: A },
+	{ name: 'feature', kind: 'local', commit: D },
+	{ name: 'origin/main', kind: 'remote', commit: C },
+];
+
+test('startup view/ready/refresh requests share one enumeration and only the latest builds staleness', async () => {
+	const f = catalogFixture();
+	const renders = ['view-resolve', 'ready', 'startup', 'git-api-state'].map((reason) => f.provider.postState(reason));
+	assert.equal(f.requests.length, 1);
+	f.requests[0].resolve(branchCatalog);
+	await Promise.all(renders);
+	assert.equal(f.requests.length, 1);
+	assert.equal(f.states.length, 1);
+	assert.equal(f.staleQueries(), 2);
+	assert.equal(f.states[0].branches.length, 3);
+});
+
+test('cached catalogs survive ordinary refreshes while HEAD and selected comparison stay fresh', async () => {
+	const f = catalogFixture();
+	const first = f.provider.postState();
+	f.requests[0].resolve(branchCatalog);
+	await first;
+	f.setHead('main');
+	f.active.compare = 'main';
+	f.active.comparisonKey = 'pair-b';
+	await f.provider.postState('review-changed');
+	assert.equal(f.requests.length, 1);
+	assert.equal(f.states.at(-1).compare, 'main');
+	assert.equal(f.states.at(-1).branches.find((ref) => ref.name === 'main').isHead, true);
+	assert.equal(f.states.at(-1).branches.find((ref) => ref.name === 'feature').isHead, false);
+});
+
+test('ref invalidation during enumeration serializes one replacement and never publishes the old catalog', async () => {
+	const f = catalogFixture();
+	const old = f.provider.postState();
+	f.provider.invalidateBranches();
+	const current = f.provider.postState();
+	f.provider.invalidateBranches();
+	const newest = f.provider.postState();
+	assert.equal(f.requests.length, 1);
+	f.requests[0].resolve(branchCatalog);
+	await new Promise(setImmediate);
+	assert.equal(f.requests.length, 2);
+	assert.equal(f.states.length, 0);
+	const updated = [...branchCatalog, { name: 'new-branch', kind: 'local', commit: E }];
+	f.requests[1].resolve(updated);
+	await Promise.all([old, current, newest]);
+	assert.equal(f.requests.length, 2);
+	assert.equal(f.states.length, 1);
+	assert.ok(f.states[0].branches.some((ref) => ref.name === 'new-branch'));
+});
+
+test('manual refresh invalidates a completed catalog, but empty/error results are always retryable', async () => {
+	const f = catalogFixture();
+	const first = f.provider.postState();
+	f.requests[0].resolve(branchCatalog);
+	await first;
+	f.provider.refresh(true);
+	assert.equal(f.requests.length, 2);
+	f.requests[1].resolve([]);
+	await new Promise(setImmediate);
+	const retryEmpty = f.provider.postState();
+	assert.equal(f.requests.length, 3);
+	f.requests[2].reject(new Error('query failure'));
+	await assert.rejects(retryEmpty, /query failure/);
+	const retryError = f.provider.postState();
+	assert.equal(f.requests.length, 4);
+	f.requests[3].resolve(branchCatalog);
+	await retryError;
+	assert.equal(f.states.at(-1).branches.length, 3);
+});
+
+test('repo root replacement neither reuses another repository catalog nor publishes its late result', async () => {
+	const f = catalogFixture();
+	const first = f.provider.postState();
+	f.active.repoRootFsPath = 'repo-b';
+	const second = f.provider.postState();
+	assert.deepEqual(f.requests.map((r) => r.cwd), ['repo-a', 'repo-b']);
+	f.requests[1].resolve(branchCatalog);
+	await second;
+	f.requests[0].resolve([{ name: 'wrong-repo', kind: 'local' }]);
+	await first;
+	await f.provider.postState();
+	assert.equal(f.requests.length, 2);
+	assert.equal(f.states.length, 2);
+	assert.ok(f.states.every((state) => !state.branches.some((ref) => ref.name === 'wrong-repo')));
+});
+
+test('native and Git-style paths for the same repository share the startup catalog', async () => {
+	const f = catalogFixture();
+	f.active.repoRootFsPath = repo;
+	const first = f.provider.postState();
+	f.active.repoRootFsPath = process.platform === 'win32' ? repo.replace(/\\/g, '/').toUpperCase() : `${repo}/.`;
+	const second = f.provider.postState();
+	assert.equal(f.requests.length, 1);
+	f.requests[0].resolve(branchCatalog);
+	await Promise.all([first, second]);
+	await f.provider.postState();
+	assert.equal(f.requests.length, 1);
+});
+
+test('branch CLI enumerates full refs once and asks Git to shorten only ambiguous names', async () => {
+	const calls = [];
+	const execFile = () => {};
+	execFile[require('node:util').promisify.custom] = async (_, args) => {
+		calls.push(args);
+		if (args[1].includes('refname:short')) {
+			return { stdout: 'refs/heads/shared\theads/shared' };
+		}
+		return { stdout: [
+			`refs/heads/main\t${A}`,
+			`refs/heads/shared\t${B}`,
+			`refs/remotes/origin/main\t${C}`,
+			`refs/remotes/origin/HEAD\t${C}`,
+			`refs/tags/shared\t${D}`,
+		].join('\n') };
+	};
+	const git = loadCompiled('git', { child_process: { execFile, exec: () => {} } });
+	assert.deepEqual(await git.listBranchesCli(repo), [
+		{ name: 'main', kind: 'local', commit: A },
+		{ name: 'heads/shared', kind: 'local', commit: B },
+		{ name: 'origin/main', kind: 'remote', commit: C },
+	]);
+	assert.equal(calls.length, 2);
+	assert.deepEqual(calls[0], ['for-each-ref', '--format=%(refname)\t%(objectname)', '--include-root-refs']);
+	assert.deepEqual(calls[1].slice(2), ['refs/heads/shared']);
+});
+
+test('large unambiguous catalogs avoid short-ref probes entirely and do not include remote HEAD aliases', async () => {
+	const rows = Array.from({ length: 5000 }, (_, i) => [`refs/remotes/origin/feature-${i}`, D]);
+	rows.push(['refs/remotes/origin/HEAD', A]);
+	const calls = [];
+	const execFile = () => {};
+	execFile[require('node:util').promisify.custom] = async (_, args, options) => {
+		calls.push(args);
+		assert.ok(options.maxBuffer > 1024 * 1024);
+		assert.ok(!args[1].includes(':short'));
+		return { stdout: rows.map((row) => row.join('\t')).join('\n') };
+	};
+	const git = loadCompiled('git', { child_process: { execFile, exec: () => {} } });
+	const refs = await git.listBranchesCli(repo);
+	assert.equal(calls.length, 1);
+	assert.equal(refs.length, 5000);
+	assert.equal(refs[4999].name, 'origin/feature-4999');
+	assert.ok(refs.every((ref) => ref.kind === 'remote' && ref.commit === D));
+});
+
+test('pseudoref-shaped and cross-namespace collisions preserve the names Git actually chooses', async () => {
+	const fullRefs = ['ORIG_HEAD', 'refs/heads/ORIG_HEAD', 'refs/heads/origin/main', 'refs/remotes/origin/main'];
+	const selected = new Map([
+		['refs/heads/ORIG_HEAD', 'heads/ORIG_HEAD'],
+		['refs/heads/origin/main', 'heads/origin/main'],
+		['refs/remotes/origin/main', 'remotes/origin/main'],
+	]);
+	const execFile = () => {};
+	execFile[require('node:util').promisify.custom] = async (_, args) => ({
+		stdout: args[1].includes(':short')
+			? args.slice(2).map((ref) => `${ref}\t${selected.get(ref)}`).join('\n')
+			: fullRefs.map((ref) => `${ref}\t${A}`).join('\n'),
+	});
+	const git = loadCompiled('git', { child_process: { execFile, exec: () => {} } });
+	assert.deepEqual((await git.listBranchesCli(repo)).map((ref) => ref.name), [...selected.values()]);
+});
+
+test('shortening exceptions are batched without truncation or inventing a name for a removed ref', async () => {
+	const names = Array.from({ length: 200 }, (_, i) => `feature-${i}-${'x'.repeat(100)}`);
+	const batches = [];
+	const execFile = () => {};
+	execFile[require('node:util').promisify.custom] = async (_, args) => {
+		if (!args[1].includes(':short')) {
+			return { stdout: names.flatMap((name) => [`refs/heads/${name}\t${A}`, `refs/tags/${name}\t${B}`]).join('\n') };
+		}
+		batches.push(args.slice(2));
+		return { stdout: args.slice(2).filter((ref) => ref !== `refs/heads/${names[0]}`)
+			.map((ref) => `${ref}\t${ref.slice('refs/'.length)}`).join('\n') };
+	};
+	const git = loadCompiled('git', { child_process: { execFile, exec: () => {} } });
+	const refs = await git.listBranchesCli(repo);
+	assert.ok(batches.length > 1);
+	assert.equal(batches.flat().length, names.length);
+	assert.equal(refs.length, names.length - 1);
+	assert.ok(refs.every((ref) => ref.name.startsWith('heads/')));
+});
+
+test('older Git retries without root-ref enumeration and conservatively delegates simple branch names', async () => {
+	const calls = [];
+	const execFile = () => {};
+	execFile[require('node:util').promisify.custom] = async (_, args) => {
+		calls.push(args);
+		if (args.includes('--include-root-refs')) { throw Object.assign(new Error('unsupported flag'), { code: 129 }); }
+		if (args[1].includes(':short')) { return { stdout: 'refs/heads/main\theads/main' }; }
+		return { stdout: `refs/heads/main\t${A}\nrefs/remotes/origin/main\t${B}` };
+	};
+	const git = loadCompiled('git', { child_process: { execFile, exec: () => {} } });
+	const expected = [{ name: 'heads/main', kind: 'local', commit: A }, { name: 'origin/main', kind: 'remote', commit: B }];
+	assert.deepEqual(await git.listBranchesCli(repo), expected);
+	assert.deepEqual(await git.listBranchesCli(repo), expected);
+	assert.equal(calls.filter((args) => args.includes('--include-root-refs')).length, 1);
+	assert.equal(calls.length, 5);
+});
+
+test('branch-catalog failures are not treated as unsupported-option retries or partial catalogs', async () => {
+	const calls = [];
+	const execFile = () => {};
+	execFile[require('node:util').promisify.custom] = async (_, args) => {
+		calls.push(args);
+		throw Object.assign(new Error('not a repository'), { code: 128 });
+	};
+	const git = loadCompiled('git', { child_process: { execFile, exec: () => {} } });
+	assert.deepEqual(await git.listBranchesCli(repo), []);
+	assert.equal(calls.length, 1);
+});
+
+test('Git API separates actual ref changes from worktree-only events for catalog invalidation', async () => {
+	let onChange;
+	let onOpen;
+	let invalidations = 0;
+	let refreshes = 0;
+	const repository = {
+		state: { refs: [{ type: 0, name: 'main', commit: A }], onDidChange: (handler) => {
+			onChange = handler;
+			return { dispose() {} };
+		} },
+	};
+	const api = { getRepository: () => repository, onDidOpenRepository: (handler) => {
+		onOpen = handler;
+		return { dispose() {} };
+	} };
+	const gitApi = loadCompiled('gitApi', { vscode: {
+		extensions: { getExtension: () => ({ isActive: true, exports: { getAPI: () => api } }) },
+		Uri: { file: (fsPath) => ({ fsPath }) },
+		Disposable: class { constructor(dispose) { this.dispose = dispose; } },
+	} });
+	const subscription = await gitApi.onRepoStateChanged(repo, () => refreshes++, () => invalidations++);
+	onOpen();
+	assert.equal(invalidations, 0);
+	assert.equal(refreshes, 0);
+	onChange();
+	repository.state.refs = [{ type: 0, name: 'main', commit: A }];
+	onChange();
+	assert.equal(invalidations, 0);
+	repository.state.refs[0].commit = B;
+	onChange();
+	repository.state.refs.push({ type: 0, name: 'new', commit: C });
+	onChange();
+	assert.equal(invalidations, 2);
+	assert.equal(refreshes, 4);
+	subscription.dispose();
 });

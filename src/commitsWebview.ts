@@ -10,7 +10,7 @@
  *
  * Metrics parity: keeps `commits.data-load` (emitted inside ActiveComparison.getCommits),
  * `commits.build` (host-side, this file) and `commits.expand` (host-side, per expand) intact, and
- * adds `commits.render` + `commits.firstPaint` via the shared webview metrics protocol.
+ * adds correlated DOM/content readiness via the shared webview metrics protocol.
  *
  * This module NEVER calls a language model.
  */
@@ -18,7 +18,8 @@
 import * as vscode from 'vscode';
 import { ActiveComparison } from './activeComparison';
 import { webviewHtml, getNonce } from './webviewShell';
-import { logBuild, logRendered, logFirstPaint, isRenderedMessage } from './webviewMetrics';
+import { logBuild, PaneMetrics } from './webviewMetrics';
+import { now } from './diagnostics';
 import { changedFilesForCommit } from './git';
 import { perfCount } from './perf';
 
@@ -39,6 +40,7 @@ type IncomingMessage =
 	| { type: 'rendered'; view: string; ms: number; count: number };
 
 export class CommitsWebviewProvider implements vscode.WebviewViewProvider {
+	private readonly metrics = new PaneMetrics('commits');
 	private view?: vscode.WebviewView;
 	private commitsExpanded = false;
 
@@ -46,13 +48,13 @@ export class CommitsWebviewProvider implements vscode.WebviewViewProvider {
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
-		const tResolve = Date.now();
+		this.metrics.bind(webviewView);
 		webviewView.webview.options = { enableScripts: true };
 		webviewView.webview.html = this.html(webviewView.webview);
 		webviewView.webview.onDidReceiveMessage(async (msg: IncomingMessage) => {
 			switch (msg.type) {
 				case 'ready':
-					await this.postState();
+					await this.postState('client-ready');
 					break;
 				case 'expand':
 					if (msg.sha) {
@@ -70,14 +72,10 @@ export class CommitsWebviewProvider implements vscode.WebviewViewProvider {
 					}
 					break;
 				default:
-					if (isRenderedMessage(msg)) {
-						logRendered(msg);
-						logFirstPaint('commits', tResolve);
-					}
 					break;
 			}
 		});
-		void this.postState();
+		void this.postState('view-resolve');
 	}
 
 	/** External refresh (called by refreshAll). */
@@ -98,28 +96,32 @@ export class CommitsWebviewProvider implements vscode.WebviewViewProvider {
 		if (!this.view || !cwd) {
 			return;
 		}
-		const tExpand = Date.now();
+		const tExpand = now();
 		const files = await changedFilesForCommit(cwd, sha);
 		perfCount('commits.expand', tExpand, files.length);
 		this.view.webview.postMessage({ type: 'files', sha, files });
 	}
 
 	/** Build the current commit list and push it to the webview (mirrors commitsView.ts root getChildren). */
-	private async postState(): Promise<void> {
+	private async postState(reason = 'refresh-or-action'): Promise<void> {
+		return this.metrics.build(() => this.buildState(), reason);
+	}
+
+	private async buildState(): Promise<void> {
 		if (!this.view) {
 			return;
 		}
 		const active = this.getActive();
 		if (!active || !active.base || !active.compare || !active.baselineCommit) {
-			this.view.webview.postMessage({ type: 'state', commits: null, error: active?.baselineError, expanded: this.commitsExpanded });
+			this.metrics.post({ type: 'state', commits: null, error: active?.baselineError, expanded: this.commitsExpanded });
 			return;
 		}
 
 		// ASSUMPTION: a pin/ref change invalidates in-flight results even if branch names stay put.
 		const key = active.comparisonKey;
-		const tBuild = Date.now();
 		const { commits, truncated } = await active.getCommits();
 		if (key !== active.comparisonKey) { return; }
+		const tBuild = now();
 		const wire: WireCommit[] = commits.map((c) => ({
 			sha: c.sha,
 			shortSha: c.shortSha,
@@ -128,7 +130,7 @@ export class CommitsWebviewProvider implements vscode.WebviewViewProvider {
 			relDate: c.relDate,
 		}));
 		logBuild('commits', tBuild, wire.length, wire);
-		this.view.webview.postMessage({
+		this.metrics.post({
 			type: 'state',
 			commits: wire,
 			truncated,
@@ -254,6 +256,7 @@ function renderCommit(c) {
 		vscode.postMessage({ type: 'copySha', sha: c.sha });
 	});
 	row.addEventListener('click', () => {
+		vscode.postMessage({ type: 'usageAction', action: expanded.has(c.sha) ? 'collapse' : 'expand' });
 		if (expanded.has(c.sha)) {
 			expanded.delete(c.sha);
 		} else {

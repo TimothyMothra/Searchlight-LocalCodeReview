@@ -20,8 +20,10 @@ directory. There is no review database and no network state. The schema source o
 - **Folder name:** `<compare>_<base>` where `compare` = SOURCE branch and `base` = TARGET branch,
   each run through `sanitizeBranch` (every `/` → `-`). Example: compare `feature/mul`, base `main`
   → `feature-mul_main/`.
-- **Activation event:** `workspaceContains:.vscode/searchlight-reviews/**/comments.json` — the
-  extension only wakes when such a file exists (or is created).
+- **Activation events:** `onStartupFinished` and
+  `workspaceContains:.vscode/searchlight-reviews/**/comments.json`, plus implicit view/command
+  activation. Inline comments and local usage observation start without opening the sidebar;
+  heavy comparison initialization remains on demand.
 
 ### Comparison preferences
 
@@ -38,6 +40,11 @@ Pins are revalidated on refresh and can be cleared with **Auto** in the Comparis
 | `registry.json` | reviewStore | reviews list + `activeReviewId` |
 | `<compare>_<base>/comments.json` | `parseReview` (reviewModel) | a `Review` (threads, comments, reviewedFiles, seqCounter) |
 | historical git blobs (via `ReviewDiffContentProvider`) | commits/files diff views | left/right sides of a diff |
+| saved review threads (via `ConversationDocumentProvider`) | read-only conversation tabs | full replies and recorded anchor context, even when the code file is gone |
+
+Conversation transcripts do not add a new on-disk review format. They read `comments.json` and
+never rewrite it just to display a discussion. `anchorText`, when present, is only the captured
+trimmed anchor line; it cannot reconstruct an entire deleted uncommitted file.
 
 ## 3. `comments.json` — the v2 schema
 

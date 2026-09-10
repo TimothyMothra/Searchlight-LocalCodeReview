@@ -12,6 +12,7 @@
  */
 
 import * as vscode from 'vscode';
+import { event, trace } from './diagnostics';
 import {
 	BranchRef,
 	Worktree,
@@ -76,13 +77,20 @@ export interface HeadInfo {
  */
 async function resolveGitApi(): Promise<GitAPI | undefined> {
 	try {
-		const ext = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
-		if (!ext) {
-			return undefined;
-		}
-		const exports = ext.isActive ? ext.exports : await ext.activate();
-		return exports?.getAPI(1);
+		return await trace('gitApi.initialize', async () => {
+			const ext = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
+			if (!ext) {
+				event('gitApi.unavailable', { reason: 'extensionMissing' });
+				return undefined;
+			}
+			event('gitApi.extensionState', { active: ext.isActive });
+			const exports = ext.isActive ? ext.exports : await trace('gitApi.activate', async () => ext.activate());
+			const api = exports?.getAPI(1);
+			if (!api) { event('gitApi.unavailable', { reason: 'exportsMissing' }); }
+			return api;
+		});
 	} catch {
+		event('gitApi.unavailable', { reason: 'initializationError' });
 		return undefined;
 	}
 }
@@ -97,9 +105,12 @@ let cachedApi: Promise<GitAPI | undefined> | undefined;
  * git extension has finished activating.
  */
 export function getGitApi(): Promise<GitAPI | undefined> {
+	// ASSUMPTION: a cached promise may still be pending; a hit is reuse, not API readiness.
+	event('gitApi.cache', { outcome: cachedApi ? 'hit' : 'miss' });
 	if (!cachedApi) {
 		cachedApi = resolveGitApi().then((api) => {
 			if (!api) {
+				event('gitApi.cache', { outcome: 'clearedUnavailable' });
 				cachedApi = undefined; // let a later call retry once the git ext is ready
 			}
 			return api;
@@ -120,14 +131,17 @@ export function getGitApi(): Promise<GitAPI | undefined> {
 function pickRepo(api: GitAPI, cwd: string): ApiRepository | undefined {
 	const repo = api.getRepository(vscode.Uri.file(cwd));
 	if (repo) {
+		event('gitApi.repository', { source: 'lookup' });
 		return repo;
 	}
 	// Exact rootUri match (or a path inside it) only — never an arbitrary repository.
 	const target = vscode.Uri.file(cwd).fsPath.replace(/\\/g, '/').toLowerCase();
-	return api.repositories.find((r) => {
+	const match = api.repositories.find((r) => {
 		const root = r.rootUri?.fsPath?.replace(/\\/g, '/').toLowerCase();
 		return root !== undefined && (target === root || target.startsWith(root + '/'));
 	});
+	event('gitApi.repository', { source: match ? 'rootMatch' : 'missing', repositoryCount: api.repositories.length });
+	return match;
 }
 
 /**
@@ -142,20 +156,35 @@ function pickRepo(api: GitAPI, cwd: string): ApiRepository | undefined {
 export async function onRepoStateChanged(
 	cwd: string,
 	handler: () => void,
+	onRefsChanged?: () => void,
 ): Promise<vscode.Disposable | undefined> {
 	const api = await getGitApi();
 	if (!api) {
+		event('gitApi.decision', { operation: 'onRepoStateChanged', source: 'watcherFallback', reason: 'apiUnavailable' });
 		return undefined;
 	}
 	const subs: vscode.Disposable[] = [];
 	let bound: ApiRepository | undefined;
 
-	const bind = (repo: ApiRepository): void => {
+	const bind = (repo: ApiRepository): boolean => {
 		if (bound === repo) {
-			return;
+			return false;
 		}
 		bound = repo;
-		subs.push(repo.state.onDidChange(handler));
+		const refSnapshot = () => JSON.stringify(repo.state.refs.map((ref) => [ref.type, ref.name, ref.commit]));
+		let previousRefs = refSnapshot();
+		subs.push(repo.state.onDidChange(() => {
+			// ASSUMPTION: index/worktree notifications alone do not invalidate branch names.
+			// Compare values, not array identity: the Git API can replace or mutate its ref array.
+			const refs = refSnapshot();
+			if (refs !== previousRefs) {
+				previousRefs = refs;
+				onRefsChanged?.();
+			}
+			handler();
+		}));
+		event('gitApi.subscription', { outcome: 'bound' });
+		return true;
 	};
 
 	const existing = pickRepo(api, cwd);
@@ -168,19 +197,22 @@ export async function onRepoStateChanged(
 		subs.push(
 			api.onDidOpenRepository(() => {
 				const repo = pickRepo(api, cwd);
-				if (repo) {
-					bind(repo);
+				if (repo && bind(repo)) {
+					onRefsChanged?.();
 					handler();
 				}
 			}),
 		);
 	} catch {
+		event('gitApi.subscription', { outcome: 'openRepositoryEventUnavailable' });
 		// onDidOpenRepository missing on this host — the initial binding above is still in effect.
 	}
 
 	if (subs.length === 0) {
+		event('gitApi.decision', { operation: 'onRepoStateChanged', source: 'watcherFallback', reason: 'noSubscriptions' });
 		return undefined;
 	}
+	event('gitApi.decision', { operation: 'onRepoStateChanged', source: 'api', bound: !!bound, subscriptionCount: subs.length });
 	return new vscode.Disposable(() => {
 		for (const s of subs) {
 			s.dispose();
@@ -192,8 +224,10 @@ export async function onRepoStateChanged(
 export async function hasRepository(cwd: string): Promise<boolean> {
 	const api = await getGitApi();
 	if (api && pickRepo(api, cwd)) {
+		event('gitApi.decision', { operation: 'hasRepository', source: 'api' });
 		return true;
 	}
+	event('gitApi.decision', { operation: 'hasRepository', source: 'cli', reason: api ? 'repositoryMissing' : 'apiUnavailable' });
 	return (await getRepoRoot(cwd)) !== undefined;
 }
 
@@ -217,9 +251,14 @@ export async function listBranches(cwd: string): Promise<BranchRef[]> {
 			}
 		}
 		if (refs.length > 0) {
+			event('gitApi.decision', { operation: 'listBranches', source: 'api', branchCount: refs.length });
 			return refs;
 		}
 	}
+	event('gitApi.decision', {
+		operation: 'listBranches', source: 'cli',
+		reason: !api ? 'apiUnavailable' : !repo ? 'repositoryMissing' : 'refsEmpty',
+	});
 	return listBranchesCli(cwd);
 }
 
@@ -232,15 +271,21 @@ export async function getHead(cwd: string): Promise<HeadInfo> {
 	// initializing, in which case `state.HEAD` is undefined and reporting "no branch" would be wrong
 	// — fall through to the CLI instead.
 	if (head) {
+		event('gitApi.decision', { operation: 'getHead', source: 'api' });
 		return {
 			branch: head.name,
 			commit: head.commit,
 			detached: !head.name,
 		};
 	}
+	event('gitApi.decision', {
+		operation: 'getHead', source: 'cli',
+		reason: !api ? 'apiUnavailable' : !repo ? 'repositoryMissing' : 'headMissing',
+	});
 	// CLI fallback: rev-parse abbrev; 'HEAD' means detached.
 	const root = await getRepoRoot(cwd);
 	if (!root) {
+		event('gitApi.unavailable', { operation: 'getHead', reason: 'repositoryRootMissing' });
 		return { detached: false };
 	}
 	const { getCurrentBranch, getCurrentCommit } = await import('./git');
@@ -255,9 +300,11 @@ export async function pull(cwd: string): Promise<void> {
 	const api = await getGitApi();
 	const repo = api ? pickRepo(api, cwd) : undefined;
 	if (repo) {
-		await repo.pull();
+		event('gitApi.decision', { operation: 'pull', source: 'api' });
+		await trace('gitApi.pull', () => repo.pull());
 		return;
 	}
+	event('gitApi.decision', { operation: 'pull', source: 'cli', reason: api ? 'repositoryMissing' : 'apiUnavailable' });
 	await pullCli(cwd);
 }
 
@@ -266,13 +313,16 @@ export async function push(cwd: string, remote?: string): Promise<void> {
 	const api = await getGitApi();
 	const repo = api ? pickRepo(api, cwd) : undefined;
 	if (repo) {
-		await repo.push(remote || undefined);
+		event('gitApi.decision', { operation: 'push', source: 'api' });
+		await trace('gitApi.push', () => repo.push(remote || undefined));
 		return;
 	}
+	event('gitApi.decision', { operation: 'push', source: 'cli', reason: api ? 'repositoryMissing' : 'apiUnavailable' });
 	await pushCli(cwd, remote);
 }
 
 /** List worktrees for `cwd` (CLI only — the vscode.git API doesn't expose worktrees). */
 export async function listWorktrees(cwd: string): Promise<Worktree[]> {
+	event('gitApi.decision', { operation: 'listWorktrees', source: 'cli', reason: 'apiUnsupported' });
 	return listWorktreesCli(cwd);
 }

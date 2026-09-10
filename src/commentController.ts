@@ -21,6 +21,8 @@ import * as store from './reviewStore';
 import { getGitUserName } from './git';
 import type { ActiveComparison } from './activeComparison';
 import { perf, perfLine } from './perf';
+import { event, milestone, now, trace } from './diagnostics';
+import { recordUsage } from './usage';
 
 /** Links a live VS Code thread back to its backing model (which review file + which thread id). */
 interface Binding {
@@ -82,7 +84,12 @@ export class SearchlightCommentController implements vscode.Disposable {
 	 */
 	private renderDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-	constructor(private readonly getActive: () => ActiveComparison | undefined = () => undefined) {
+	private exposedThreads = '';
+
+	constructor(
+		private readonly getActive: () => ActiveComparison | undefined = () => undefined,
+		private readonly ensureActive?: () => Promise<void>,
+	) {
 		this.controller = vscode.comments.createCommentController(
 			'searchlight',
 			'Searchlight Reviews',
@@ -102,6 +109,7 @@ export class SearchlightCommentController implements vscode.Disposable {
 			},
 		};
 		this.disposables.push(this.controller);
+		this.disposables.push(vscode.window.onDidChangeVisibleTextEditors(() => this.recordVisibleDiscussions()));
 	}
 
 	dispose(): void {
@@ -169,11 +177,14 @@ export class SearchlightCommentController implements vscode.Disposable {
 	 */
 	private scheduleRender(): void {
 		this.materialized = true;
+		const scheduledAt = now();
+		event('comments.schedule', { coalesced: !!this.renderDebounceTimer, delayMs: RENDER_DEBOUNCE_MS });
 		if (this.renderDebounceTimer) {
 			clearTimeout(this.renderDebounceTimer);
 		}
 		this.renderDebounceTimer = setTimeout(() => {
 			this.renderDebounceTimer = null;
+			event('comments.debounceWait', { durationMs: now() - scheduledAt });
 			void this.doRender();
 		}, RENDER_DEBOUNCE_MS);
 	}
@@ -188,20 +199,24 @@ export class SearchlightCommentController implements vscode.Disposable {
 			return;
 		}
 		this.deferArmed = true;
-		const trigger = () => {
+		const deferredAt = now();
+		event('comments.deferArmed', { fallbackMs: 1200 });
+		const trigger = (reason: string) => {
 			if (this.materialized) {
 				return;
 			}
 			this.materialized = true;
+			event('comments.deferWait', { reason, durationMs: now() - deferredAt });
 			for (const d of this.deferDisposables) {
 				d.dispose();
 			}
 			this.deferDisposables.length = 0;
 			this.scheduleRender();
 		};
-		this.deferDisposables.push(vscode.window.onDidChangeVisibleTextEditors(() => trigger()));
-		const timer = setTimeout(trigger, 1200);
+		this.deferDisposables.push(vscode.window.onDidChangeVisibleTextEditors(() => trigger('visible-editor')));
+		const timer = setTimeout(() => trigger('fallback-timeout'), 1200);
 		this.deferDisposables.push({ dispose: () => clearTimeout(timer) });
+		if (vscode.window.visibleTextEditors.length > 0) { trigger('already-visible-editor'); }
 	}
 
 	/**
@@ -218,9 +233,10 @@ export class SearchlightCommentController implements vscode.Disposable {
 	private async doRender(): Promise<void> {
 		if (this.renderInFlight) {
 			this.renderQueued = true;
+			event('comments.queued');
 			return this.renderInFlight;
 		}
-		this.renderInFlight = this._doRenderOnce();
+		this.renderInFlight = trace('comments.reconcile', () => this._doRenderOnce());
 		try {
 			await this.renderInFlight;
 		} finally {
@@ -234,7 +250,7 @@ export class SearchlightCommentController implements vscode.Disposable {
 
 	/** One reconcile pass. Never call directly — go through `doRender()` for serialization. */
 	private async _doRenderOnce(): Promise<void> {
-		const t = Date.now();
+		const t = now();
 		this.renderCount++;
 		const reviews = await store.scanReviews();
 
@@ -308,6 +324,18 @@ export class SearchlightCommentController implements vscode.Disposable {
 			t,
 			`call #${this.renderCount}, +${created} ~${updated} -${removed} =${kept}`,
 		);
+		milestone('comments.ready', { count: this.rendered.size });
+		this.recordVisibleDiscussions();
+	}
+
+	private recordVisibleDiscussions(): void {
+		const visible = new Set(vscode.window.visibleTextEditors.map((editor) => editor.document.uri.toString()));
+		const keys = [...this.rendered].filter(([, entry]) => visible.has(entry.vsThread.uri.toString())).map(([key]) => key).sort();
+		const signature = JSON.stringify(keys);
+		if (signature === this.exposedThreads) { return; }
+		this.exposedThreads = signature;
+		// ASSUMPTION: a thread in a visible editor is exposure, not evidence its contents were read.
+		if (keys.length) { recordUsage('discussion.exposed', { count: keys.length }); }
 	}
 
 	private key(reviewFile: string, threadId: string): string {
@@ -472,6 +500,7 @@ export class SearchlightCommentController implements vscode.Disposable {
 				store.addThreadTags(review, binding.threadId, tags);
 			}
 			await store.saveReview(review);
+			recordUsage('discussion.replied', { tagged: tags.length > 0 });
 		} else {
 			await this.createNewThread(reply, body, author, tags);
 		}
@@ -491,6 +520,8 @@ export class SearchlightCommentController implements vscode.Disposable {
 		if (body.trim().length === 0) {
 			return;
 		}
+		// Existing replies use their binding; only a new thread needs the current branch's target.
+		await this.ensureActive?.();
 		const reviews = await store.scanReviews();
 		// Prefer the currently-viewed comparison's review (its emptyReview() always has a valid
 		// sourceFile) so the first-ever comment lands even before any comments.json exists on disk.
@@ -542,6 +573,7 @@ export class SearchlightCommentController implements vscode.Disposable {
 		}
 		store.addThread(target, rel, startLine, endLine, body, author, tags, anchorText);
 		await store.saveReview(target);
+		recordUsage('discussion.created', { tagged: tags.length > 0 });
 		// Keep the active in-memory review authoritative post-write so the NEXT thread's seq
 		// is also computed from a correct set.
 		if (active && active.review?.sourceFile === target.sourceFile) {
@@ -599,8 +631,12 @@ export class SearchlightCommentController implements vscode.Disposable {
 		if (!review) {
 			return;
 		}
+		const previous = review.threads.find((thread) => thread.id === threadId)?.state;
 		store.setThreadState(review, threadId, state);
 		await store.saveReview(review);
+		if (previous && previous !== state) {
+			recordUsage(state === 'resolved' ? 'discussion.resolved' : 'discussion.reopened');
+		}
 		this.materialized = true;
 		await this.render();
 	}

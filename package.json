@@ -42,8 +42,17 @@
           "id": "searchlight.comparison",
           "name": "Comparison",
           "type": "webview",
+          "visibility": "collapsed",
           "icon": "media/searchlight.svg",
           "initialSize": 230
+        },
+        {
+          "id": "searchlight.commits",
+          "name": "Commits",
+          "type": "webview",
+          "visibility": "collapsed",
+          "icon": "media/searchlight.svg",
+          "initialSize": 200
         },
         {
           "id": "searchlight.files",
@@ -51,13 +60,6 @@
           "type": "webview",
           "icon": "media/searchlight.svg",
           "initialSize": 400
-        },
-        {
-          "id": "searchlight.commits",
-          "name": "Commits",
-          "type": "webview",
-          "icon": "media/searchlight.svg",
-          "initialSize": 200
         },
         {
           "id": "searchlight.conversations",
@@ -384,11 +386,6 @@
           "group": "navigation@0"
         },
         {
-          "command": "searchlight.commitsViewAllChanges",
-          "when": "view == searchlight.files",
-          "group": "navigation@1"
-        },
-        {
           "command": "searchlight.filesExpandAll",
           "when": "view == searchlight.files",
           "group": "navigation@2"
@@ -515,7 +512,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "test": "npm run compile && node --test scripts/comparison.test.cjs scripts/diagnostics.test.cjs scripts/usage.test.cjs scripts/usage-integration.test.cjs scripts/conversation.test.cjs scripts/review-discovery.test.cjs",
+    "test": "npm run compile && node --test scripts/comparison.test.cjs scripts/diagnostics.test.cjs scripts/usage.test.cjs scripts/usage-integration.test.cjs scripts/conversation.test.cjs scripts/review-discovery.test.cjs scripts/pane-defaults.test.cjs",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {

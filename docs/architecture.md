@@ -54,19 +54,23 @@ extension.ts ............ activation, view wiring, command registration, Ask-Cop
 The activity-bar container `searchlight` hosts four views, all reading from one `ActiveComparison`
 supplied via a `() => active` getter:
 
-| View | id | Kind | Role |
-|------|----|------|------|
-| Comparison | `searchlight.comparison` | **WebviewView** | Inline base/compare branch selector + per-row Pull/Update (FF-only) |
-| Changed Files | `searchlight.files` | TreeView | Folder tree of changed files; checkboxes mark `reviewedFiles`; expand/collapse-all |
-| Commits | `searchlight.commits` | TreeView | Commit list; click = that commit's diff; "View All Changes vs Base"; copy-SHA secondary |
-| Conversations | `searchlight.conversations` | TreeView | reviews -> threads -> comments; click jumps to `filePath:startLine` |
+| Order | View | Default | Role |
+|-------|------|---------|------|
+| 1 | Comparison (`searchlight.comparison`) | Collapsed | Inline branch selectors and Pull/Update controls |
+| 2 | Commits (`searchlight.commits`) | Collapsed | Commit/file inspection and copy-SHA |
+| 3 | Changed Files (`searchlight.files`) | All folders initially expanded | Changed files and reviewed-file checkboxes; no all-changes toolbar button |
+| 4 | Conversations (`searchlight.conversations`) | Resolved threads hidden | Inline-code navigation, Read transcript, resolve/reopen controls |
 
-**Why Comparison is a webview and the other three are TreeViews.** The Comparison view originally
+All four are WebviewViews. The Comparison view originally
 used a two-row TreeView whose rows fired `showQuickPick()`. The resulting top-center popup was
 routinely mistaken for the Command Palette / search bar. Replacing it with a `WebviewViewProvider`
-that renders two `<input>` + filterable-dropdown fields *in place* removed the popup entirely. The
-other three views are naturally hierarchical and use the native TreeView for free
-expand/collapse/checkbox behavior.
+that renders two `<input>` + filterable-dropdown fields *in place* removed the popup entirely.
+
+Manifest collapse/order defaults do not override layouts VS Code already remembers for a workspace.
+Changed Files applies initial expansion once per webview, preserving subsequent folder choices
+across refreshes; its Expand All command remains available. Conversations retains an explicit
+Show Resolved choice across reloads. `searchlight.commitsViewAllChanges` remains a Command Palette
+action even though its Changed Files toolbar button was removed.
 
 ## 4. The active comparison (single source of truth)
 

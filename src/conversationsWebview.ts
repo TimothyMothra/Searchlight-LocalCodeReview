@@ -71,9 +71,9 @@ const HIDE_RESOLVED_KEY = 'searchlight.conversations.hideResolved';
  */
 const HIDE_RESOLVED_CONTEXT = 'searchlight.conversationsResolvedHidden';
 
-/** Read the persisted hide-resolved flag (default false = resolved threads shown). */
+/** ASSUMPTION: hide resolved discussions initially; an explicit Show choice remains persistent. */
 export function isResolvedHidden(workspaceState: vscode.Memento): boolean {
-	return workspaceState.get<boolean>(HIDE_RESOLVED_KEY, false);
+	return workspaceState.get<boolean>(HIDE_RESOLVED_KEY, true);
 }
 
 /** Push the persisted flag into the context key that gates the title-bar buttons. */
@@ -399,7 +399,7 @@ const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>'
 const SLASH_SVG = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 1a7 7 0 100 14A7 7 0 008 1zM2 8a6 6 0 019.75-4.66L3.34 11.75A5.97 5.97 0 012 8zm2.25 4.66A6 6 0 0014 8a5.97 5.97 0 00-1.34-3.75l-8.41 8.41z"/></svg>';
 
 let threads = null;                 // WireThread[] | null
-let hideResolved = false;           // host-authoritative toggle state (restored from state payload)
+let hideResolved = true;            // host-authoritative toggle state (restored from state payload)
 const threadOpen = new Map();       // thread key → bool (user override of default open state)
 
 function readConversation(t) {

@@ -138,6 +138,8 @@ live reply updates, legacy identity, workspace-scoped references and separate Re
 `review-discovery.test.cjs` covers targeted multi-root/nested scans, absent stores, permission
 failures, in-flight sharing and linked-directory cycle avoidance. Branch tests cover large
 unambiguous catalogs, batched shortening exceptions and older Git capability fallback.
+`pane-defaults.test.cjs` covers pane order/collapse contributions, toolbar removal, initial Files
+expansion without repeated refresh overrides, and the persisted resolved-thread visibility toggle.
 The read-only Git-query fixtures cover advancing/stale target refs, rebases, stacked targets,
 explicit remote selection, ambiguous ancestry, pin persistence/reset/invalidation, and consistent
 baseline endpoints across file lists, commits and diff editors. They do not modify any Git refs,

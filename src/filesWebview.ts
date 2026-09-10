@@ -99,7 +99,8 @@ export async function syncUncommittedContext(workspaceState: vscode.Memento): Pr
 export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 	private readonly metrics = new PaneMetrics('files');
 	private view?: vscode.WebviewView;
-	private filesExpanded = false;
+	// ASSUMPTION: expand the initial tree, but do not override later folder choices on refresh.
+	private filesExpanded = true;
 
 	/** relPath of the row mirroring the active editor (auto-reveal). Undefined = nothing revealed. */
 	private revealPath?: string;
@@ -647,7 +648,8 @@ const FOLDER_SVG = '<svg viewBox="0 0 16 16"><path d="M14.5 3H7.7l-1-1H1.5L1 2.5
 const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
 
 let expanded = new Set();      // relPaths of expanded folders
-let expandAll = false;
+let expandAll = true;
+let expansionInitialized = false;
 let lastTree = null;           // WireDir | null | undefined(sentinel → loading)
 let comparisonError = null;
 let hideUncommitted = false;   // host-authoritative; drives the empty-state message
@@ -878,7 +880,10 @@ window.addEventListener('message', (e) => {
 		}
 		if (typeof m.hideUncommitted === 'boolean') { hideUncommitted = m.hideUncommitted; }
 		ucHidden = typeof m.ucHidden === 'number' ? m.ucHidden : 0;
-		if (typeof m.expanded === 'boolean') { expandAll = m.expanded; }
+		if (!expansionInitialized && typeof m.expanded === 'boolean') {
+			expandAll = m.expanded;
+			expansionInitialized = true;
+		}
 		cumulative = !!m.cumulative;
 		// Adopt the host's reveal target so the highlight survives a full refresh.
 		revealPath = typeof m.revealPath === 'string' ? m.revealPath : null;
@@ -889,6 +894,7 @@ window.addEventListener('message', (e) => {
 		expandToReveal();
 		paint();   // paint() scrolls the revealed row into view
 	} else if (m.type === 'setExpanded') {
+		expansionInitialized = true;
 		expandAll = !!m.value;
 		if (!m.value) { expanded.clear(); }
 		paint();

@@ -26,6 +26,7 @@ together and why.
 extension.ts ............ activation, view wiring, command registration, Ask-Copilot bridge
   │
   ├─ activeComparison.ts . ActiveComparison — the single source of truth (base + compare + review)
+  │      ├─ baseline.ts ... read-only ancestry resolution and explicit baseline-pin validation
   │      ├─ git.ts ........ no-shell git helpers (changedFiles, logRange, aheadBehind, worktrees)
   │      ├─ gitApi.ts ..... thin wrapper over the built-in vscode.git extension API
   │      └─ reviewStore.ts  load/serialize/mutate comments.json (+ durable seqCounter)
@@ -64,16 +65,52 @@ expand/collapse/checkbox behavior.
 ## 4. The active comparison (single source of truth)
 
 `ActiveComparison` (activeComparison.ts) holds `base`/`compare` branch names, their resolved commit
-shas, the current HEAD, the resolved `reviewDir` + `sourceFile` path, and the in-memory `Review`.
+shas, a separate effective `baselineCommit`, the current HEAD, the resolved `reviewDir` +
+`sourceFile` path, and the in-memory `Review`.
 All four views and the CommentController read from it, so a single `refreshAll()` keeps everything
 consistent.
 
 - `base` = TARGET branch → maps to `review.targetBranch`.
 - `compare` = SOURCE branch under review → maps to `review.sourceBranch`.
-- `changedFiles` / `logRange` results are memoized keyed by the resolved commit pair, so re-renders
+- `changedFiles` / `logRange` results are memoized keyed by the effective baseline/compare commit pair, so re-renders
   don't re-shell git.
 - The review file is created **lazily**: only a mutation (a reviewed-file checkbox toggle or a
   comment add/reply) persists `comments.json`.
+
+### Target branch vs. effective baseline
+
+The **Target branch** identifies the intended destination and continues to identify the review.
+The **Effective baseline** is the exact commit used on the left of branch-review diffs:
+
+- **Auto:** for a local target, consider that ref and its configured upstream. When no upstream is
+  configured, also consider an existing matching `origin/<target>` ref. Choose the most advanced
+  shared ancestor with the compare commit **by ancestry**, never by timestamp. Equal ancestors
+  retain the selected target as the explanation source. An explicitly selected remote-tracking
+  target uses only that ref.
+- **Pin commit...:** enter an ancestor commit SHA. It is resolved to a full ID and persisted per
+  target/source pair in VS Code workspace state. **Auto** clears the pin. Pins survive reloads
+  and target updates, but a rebase that makes the pin cease to be an ancestor blocks comparison
+  until the user clears or replaces it.
+- Missing refs, no shared ancestry, multiple merge-bases, and incomparable candidate baselines
+  are visible errors, not empty successful comparisons or fallbacks to the target tip.
+
+The pane shows the baseline SHA, auto/pinned mode, and the selection reason. Target selections are
+remembered per source branch in workspace state; review folder names and `comments.json` target
+identity do not change when Auto chooses an upstream's shared ancestor.
+
+This handles both an advancing main branch (the shared ancestor stays put) and a rebased source
+with stale local main (a newer upstream ancestor can win). It does not guess a feature branch's
+parent from unrelated branch names or fetch automatically. If all available refs are stale, fetch
+explicitly or pin the intended ancestor.
+
+Committed file lists and commit ranges use the resolved baseline/compare SHAs. Cumulative lists
+use baseline vs. working tree plus untracked files. Single-file and **View All Changes** diffs use
+the same baseline; the latter includes cumulative/untracked changes when cumulative mode is on.
+Uncommitted SCM-group diffs and individual-commit diffs retain their index/HEAD/parent semantics.
+
+Resolution refreshes on Git API state events, manual Refresh, and filesystem events for the actual
+worktree HEAD and shared loose/packed refs. This includes ref changes made from another worktree.
+Overtaken resolutions/results are discarded so an older query cannot replace a newer selection.
 
 ## 5. Activation flow (fast-return pattern)
 
@@ -157,7 +194,8 @@ reply. **No LM API, no keys, no in-extension model call.**
 
 ## 10. Known constraints
 
-- **Local branches only.** No remote PR integration (GitHub/ADO) — a comparison is two local refs.
+- **Locally available refs only.** Local and remote-tracking branches are supported, but there is
+  no remote PR integration (GitHub/ADO) or automatic fetch during baseline resolution.
 - **Per-row Pull/Update is FF-only.** It fetches and fast-forwards a stale local branch to its
   upstream; if not fast-forwardable it warns and does nothing (never merges or rebases). No push.
 - **Single workspace folder assumed** for the review store location.

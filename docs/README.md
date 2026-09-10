@@ -27,7 +27,9 @@ review thread to the `copilot` CLI so an agent can reply in-thread and stamp its
 - **Everything is a file.** A "review" is a `comments.json` under `.vscode/searchlight-reviews/`.
   There is no server, database, or network dependency.
 - **A comparison = base + compare.** `base` is the TARGET branch, `compare` is the SOURCE branch
-  under review. The four views all read one in-memory `ActiveComparison`.
+  under review. A separate **effective baseline** is inferred from local/upstream shared ancestry
+  or pinned to an explicit ancestor commit. The Comparison pane shows its SHA and reason, with
+  **Pin commit...** and **Auto** controls. The four views all read one `ActiveComparison`.
 - **The model layer is `vscode`-free.** `reviewModel.ts` has no `vscode` import so the schema and
   its migrations are unit-testable in isolation; callers wrap its outputs with VS Code types.
 - **Writes are lazy + diff-friendly.** `comments.json` is created on the first mutation (a comment

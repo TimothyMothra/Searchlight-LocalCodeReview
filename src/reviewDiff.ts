@@ -11,7 +11,7 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ActiveComparison } from './activeComparison';
-import { changedFilesForCommit } from './git';
+import { changedFilesForCommit, changedFilesUncommitted } from './git';
 
 const execFileAsync = promisify(execFile);
 
@@ -64,28 +64,28 @@ function short(ref: string): string {
 
 /**
  * Open the native diff editor for a single changed file in the active comparison.
- * Left = base ref (read-only). Right = the working-tree file when `compare` is the checked-out HEAD
+ * Left = effective baseline (read-only). Right = the working-tree file when `compare` is the checked-out HEAD
  * (so the user can edit and comment inline), otherwise the compare ref (read-only).
  */
 export async function openFileDiff(active: ActiveComparison, relPath: string): Promise<void> {
 	const cwd = active.repoRootFsPath;
-	const base = active.base;
-	const compare = active.compare;
+	// ASSUMPTION: file lists and diff content share the same resolved snapshot, including pins.
+	const base = active.baselineCommit;
+	const compare = active.compareCommit;
 	if (!cwd || !base || !compare) {
+		void vscode.window.showWarningMessage(active.baselineError ?? 'Searchlight: select a resolved comparison first.');
 		return;
 	}
 
 	const leftUri = diffUri(relPath, base, cwd);
 
-	const compareIsHead =
-		(active.headBranch !== undefined && compare === active.headBranch) ||
-		(active.compareCommit !== undefined && active.compareCommit === active.headCommit);
+	const compareIsHead = active.compareIsHead;
 
 	const rightUri = compareIsHead
 		? vscode.Uri.file(path.join(cwd, relPath))
 		: diffUri(relPath, compare, cwd);
 
-	const title = `${relPath} (${short(base)} \u2194 ${short(compare)})`;
+	const title = `${relPath} (${short(base)} baseline \u2194 ${active.compare ?? short(compare)})`;
 	await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title, { preview: false });
 }
 
@@ -154,13 +154,14 @@ function compareIsHead(active: ActiveComparison): boolean {
  */
 export async function openCumulativeFileDiff(active: ActiveComparison, relPath: string): Promise<void> {
 	const cwd = active.repoRootFsPath;
-	const mergeBaseSha = active.mergeBaseCommit;
+	const mergeBaseSha = active.baselineCommit;
 	if (!cwd || !relPath || !mergeBaseSha) {
+		void vscode.window.showWarningMessage(active.baselineError ?? 'Searchlight: select a resolved comparison first.');
 		return;
 	}
 	const leftUri = diffUri(relPath, mergeBaseSha, cwd);
 	const rightUri = vscode.Uri.file(path.join(cwd, relPath));
-	const title = `${relPath} (${short(active.base ?? mergeBaseSha)} \u2194 working, cumulative)`;
+	const title = `${relPath} (${short(mergeBaseSha)} baseline \u2194 working, cumulative)`;
 	await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title, { preview: false });
 }
 
@@ -171,24 +172,36 @@ export async function openCumulativeFileDiff(active: ActiveComparison, relPath: 
  */
 export async function openAllChangesDiff(active: ActiveComparison): Promise<void> {
 	const cwd = active.repoRootFsPath;
-	const base = active.base;
-	const compare = active.compare;
+	const base = active.baselineCommit;
+	const compare = active.compareCommit;
 	if (!cwd || !base || !compare) {
+		void vscode.window.showWarningMessage(active.baselineError ?? 'Searchlight: select a resolved comparison first.');
 		return;
 	}
-	const files = await active.getChangedFiles();
+	const key = active.comparisonKey;
+	const rightIsHead = compareIsHead(active);
+	const cumulative = rightIsHead && vscode.workspace.getConfiguration('searchlight').get<boolean>('files.cumulativeDiff', true);
+	const files = cumulative ? await active.getChangedFilesCumulative() : await active.getChangedFiles();
+	if (cumulative) {
+		const { untracked } = await changedFilesUncommitted(cwd);
+		const paths = new Set(files.map((file) => file.relPath));
+		files.push(...untracked.filter((file) => !paths.has(file.relPath)));
+	}
+	if (key !== active.comparisonKey) {
+		void vscode.window.showWarningMessage('Searchlight: the comparison changed while loading diffs. Open the changes again.');
+		return;
+	}
 	if (files.length === 0) {
 		void vscode.window.showInformationMessage('Searchlight: no changed files between base and compare.');
 		return;
 	}
-	const rightIsHead = compareIsHead(active);
 	const resources = files.map(({ relPath: rel }) => {
 		const resourceUri = vscode.Uri.file(path.join(cwd, rel));
 		const leftUri = diffUri(rel, base, cwd);
 		const rightUri = rightIsHead ? vscode.Uri.file(path.join(cwd, rel)) : diffUri(rel, compare, cwd);
 		return [resourceUri, leftUri, rightUri] as [vscode.Uri, vscode.Uri, vscode.Uri];
 	});
-	const title = `Changes: ${short(base)} \u2194 ${short(compare)}`;
+	const title = `Changes: ${short(base)} baseline \u2194 ${rightIsHead ? 'working' : short(compare)}`;
 	await vscode.commands.executeCommand('vscode.changes', title, resources);
 }
 

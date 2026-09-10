@@ -1,7 +1,7 @@
 # Data Model
 
-Everything Searchlight persists is a plain JSON file under a workspace's `.vscode/searchlight-reviews/`
-directory. There is no database and no network state. The schema source of truth is
+Searchlight review content is persisted as plain JSON under a workspace's `.vscode/searchlight-reviews/`
+directory. There is no review database and no network state. The schema source of truth is
 `src/reviewModel.ts` (types, parse, migration — deliberately `vscode`-free) and `src/reviewStore.ts`
 (serialize, load, mutate).
 
@@ -22,6 +22,14 @@ directory. There is no database and no network state. The schema source of truth
   → `feature-mul_main/`.
 - **Activation event:** `workspaceContains:.vscode/searchlight-reviews/**/comments.json` — the
   extension only wakes when such a file exists (or is created).
+
+### Comparison preferences
+
+VS Code workspace state stores the selected target per source branch and an optional full baseline
+commit SHA per target/source pair. These are local UI preferences, not review-schema fields.
+Changing the inferred baseline or a pin does not rename review folders or rewrite comments.
+`targetBranch`/`targetCommit` continue to describe the selected target, not the effective baseline.
+Pins are revalidated on refresh and can be cleared with **Auto** in the Comparison pane.
 
 ## 2. Sources → readers
 

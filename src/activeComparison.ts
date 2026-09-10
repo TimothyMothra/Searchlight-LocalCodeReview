@@ -9,7 +9,8 @@
 
 import * as vscode from 'vscode';
 import { getHead } from './gitApi';
-import { changedFiles, changedFilesCumulative, ChangedFile, CommitEntry, defaultBaseBranch, logRange, mergeBase, resolveCommit } from './git';
+import { changedFiles, changedFilesCumulative, ChangedFile, CommitEntry, defaultBaseBranch, logRange, resolveCommit } from './git';
+import { Baseline, resolveBaseline, resolveBaselinePin } from './baseline';
 import { computeReviewPaths, emptyReview, loadReview } from './reviewStore';
 import { Review } from './reviewModel';
 import { perfCount } from './perf';
@@ -25,10 +26,14 @@ export class ActiveComparison {
 	/** Full sha `compare` resolves to. */
 	compareCommit?: string;
 	/**
-	 * Merge-base of `base` and `compare` — where the branch diverged. Left side of the cumulative
-	 * diff. Undefined when it can't be computed (unrelated histories, unresolved refs).
+	 * Effective baseline: inferred shared ancestor or explicit pinned commit.
+	 * ASSUMPTION: every branch comparison uses this SHA, never the target branch tip.
 	 */
-	mergeBaseCommit?: string;
+	baselineCommit?: string;
+	baselinePin?: string;
+	baselineReason = '';
+	baselineError?: string;
+	private resolveVersion = 0;
 
 	/** Current HEAD branch of the repo (undefined when detached). */
 	headBranch?: string;
@@ -66,7 +71,28 @@ export class ActiveComparison {
 		 * activation critical path — see the environmental-AV note in extension.ts).
 		 */
 		public repoRootFsPath: string,
+		private readonly workspaceState: vscode.Memento,
 	) {}
+
+	get comparisonKey(): string {
+		return JSON.stringify([this.base, this.compare, this.baselineCommit, this.compareCommit, this.baselineError]);
+	}
+
+	private pinKey(base: string, compare: string): string {
+		return `searchlight.baselinePin.${JSON.stringify([base, compare])}`;
+	}
+
+	private targetKey(compare: string): string {
+		return `searchlight.target.${JSON.stringify(compare)}`;
+	}
+
+	private invalidateBaseline(): void {
+		++this.resolveVersion;
+		this.baselineCommit = undefined;
+		this.baselinePin = undefined;
+		this.baselineReason = '';
+		this.baselineError = undefined;
+	}
 
 	/** True when `compare` is the currently checked-out HEAD (so its side is the editable working tree). */
 	get compareIsHead(): boolean {
@@ -90,15 +116,15 @@ export class ActiveComparison {
 		this.headBranch = head.detached ? undefined : head.branch;
 		this.headCommit = head.commit;
 
-		if (this.base === undefined) {
-			this.base = defBase;
-		}
 		if (this.compare === undefined) {
 			if (!head.detached && head.branch) {
 				this.compare = head.branch;
 			} else if (head.commit) {
 				this.compare = head.commit.slice(0, 7);
 			}
+		}
+		if (this.base === undefined) {
+			this.base = (this.compare ? this.workspaceState.get<string>(this.targetKey(this.compare)) : undefined) ?? defBase;
 		}
 	}
 
@@ -108,50 +134,70 @@ export class ActiveComparison {
 	 * yet written to disk).
 	 */
 	async resolve(): Promise<void> {
+		const version = ++this.resolveVersion;
 		// HEAD must be resolved BEFORE the commits: auto-follow below can change `compare`, and
 		// resolving `compareCommit` from a stale branch name would show the new branch with the old
-		// commit. Base/compare commit resolution stays parallel with each other.
+		// commit. Apply the resolved comparison atomically after all queries complete.
 		const head = await getHead(this.repoRootFsPath);
-		this.headBranch = head.detached ? undefined : head.branch;
-		this.headCommit = head.commit;
+		if (version !== this.resolveVersion) { return; }
+		const headBranch = head.detached ? undefined : head.branch;
+		let base = this.base;
+		let compare = this.compare;
 
 		// Auto-follow the checked-out branch: when the user has NOT explicitly picked a compare
 		// branch, `compare` tracks HEAD so a `git checkout` is reflected instead of leaving a stale
 		// branch shown. An explicit setCompare/swap opts out until the next explicit change.
 		// Skipped while detached so a transient detach doesn't clobber a branch name with a short sha.
-		if (!this.compareExplicit && !head.detached && this.headBranch && this.compare !== this.headBranch) {
-			this.compare = this.headBranch;
+		if (!this.compareExplicit && !head.detached && headBranch && compare !== headBranch) {
+			compare = headBranch;
+			base = this.workspaceState.get<string>(this.targetKey(compare)) ?? await defaultBaseBranch(this.repoRootFsPath);
 		}
 
-		const [baseCommit, compareCommit] = await Promise.all([
-			this.base
-				? resolveCommit(this.repoRootFsPath, this.base)
-				: Promise.resolve<string | undefined>(undefined),
-			this.compare
-				? resolveCommit(this.repoRootFsPath, this.compare)
-				: Promise.resolve<string | undefined>(undefined),
-		]);
-		this.baseCommit = baseCommit;
-		this.compareCommit = compareCommit;
-		// Divergence point for the cumulative (merge-base → working tree) diff. Needs both refs, so it
-		// runs after they resolve; undefined when unavailable, which disables cumulative mode.
-		this.mergeBaseCommit =
-			this.base && this.compare
-				? await mergeBase(this.repoRootFsPath, this.base, this.compare)
-				: undefined;
-
-		if (!this.base || !this.compare) {
+		if (version !== this.resolveVersion) { return; }
+		if (!base || !compare) {
+			this.headBranch = headBranch;
+			this.headCommit = head.commit;
+			this.baseCommit = undefined;
+			this.compareCommit = undefined;
+			this.baselineCommit = undefined;
+			this.baselinePin = undefined;
+			this.baselineReason = '';
+			this.baselineError = undefined;
 			this.reviewDir = '';
 			this.sourceFile = '';
 			this.review = undefined;
 			return;
 		}
 
-		const paths = computeReviewPaths(this.workspaceFolderFsPath, this.compare, this.base);
+		const compareCommit = await resolveCommit(this.repoRootFsPath, compare);
+		const pin = this.workspaceState.get<string>(this.pinKey(base, compare));
+		let baseline: Baseline | undefined;
+		let baselineError: string | undefined;
+		try {
+			if (!compareCommit) {
+				throw new Error(`Compare ref '${compare}' cannot be resolved to a commit.`);
+			}
+			baseline = await resolveBaseline(this.repoRootFsPath, base, compareCommit, pin);
+		} catch (error) {
+			// Resolution failures are visible in Comparison; never substitute the target tip.
+			baselineError = error instanceof Error ? error.message : String(error);
+		}
+		const paths = computeReviewPaths(this.workspaceFolderFsPath, compare, base);
+		const existing = await loadReview(vscode.Uri.file(paths.sourceFile));
+		// A rebase/ref change or user selection can overtake an earlier git query.
+		if (version !== this.resolveVersion) { return; }
+		this.base = base;
+		this.compare = compare;
+		this.headBranch = headBranch;
+		this.headCommit = head.commit;
+		this.baseCommit = baseline?.targetCommit;
+		this.compareCommit = compareCommit;
+		this.baselineCommit = baseline?.commit;
+		this.baselinePin = pin;
+		this.baselineReason = baseline?.reason ?? '';
+		this.baselineError = baselineError;
 		this.reviewDir = paths.reviewDir;
 		this.sourceFile = paths.sourceFile;
-
-		const existing = await loadReview(vscode.Uri.file(this.sourceFile));
 		if (existing) {
 			// Ensure the runtime-only path is populated (parseReview sets it from the file uri).
 			existing.sourceFile = this.sourceFile;
@@ -194,29 +240,56 @@ export class ActiveComparison {
 
 	/** Set the base (target) branch and re-resolve. */
 	async setBase(base: string): Promise<void> {
+		this.invalidateBaseline();
 		this.base = base;
+		if (this.compare) {
+			await this.workspaceState.update(this.targetKey(this.compare), base);
+		}
+		await this.resolve();
+	}
+
+	/** Pins are scoped to target/source, so changing comparisons cannot reuse an unrelated pin. */
+	async setBaselinePin(value: string | undefined): Promise<void> {
+		const { base, compare, compareCommit } = this;
+		if (!base || !compare || (value !== undefined && !compareCommit)) {
+			throw new Error('Select a target and a resolvable compare branch first.');
+		}
+		const pin = value !== undefined && compareCommit
+			? await resolveBaselinePin(this.repoRootFsPath, value, compareCommit)
+			: undefined;
+		if (base !== this.base || compare !== this.compare || compareCommit !== this.compareCommit) {
+			throw new Error('The comparison changed while selecting a baseline. Try again.');
+		}
+		this.invalidateBaseline();
+		await this.workspaceState.update(this.pinKey(base, compare), pin);
 		await this.resolve();
 	}
 
 	/** Set the compare (source) branch and re-resolve. */
 	async setCompare(compare: string): Promise<void> {
+		this.invalidateBaseline();
 		this.compare = compare;
+		this.base = this.workspaceState.get<string>(this.targetKey(compare)) ?? this.base;
 		this.compareExplicit = true;   // opt out of auto-follow — the user chose this branch
 		await this.resolve();
 	}
 
 	/** Swap base and compare, then re-resolve. */
 	async swap(): Promise<void> {
+		this.invalidateBaseline();
 		const oldBase = this.base;
 		this.base = this.compare;
 		this.compare = oldBase;
 		this.compareExplicit = true;   // opt out of auto-follow — the user chose this branch
+		if (this.base && this.compare) {
+			await this.workspaceState.update(this.targetKey(this.compare), this.base);
+		}
 		await this.resolve();
 	}
 
 	/** Cache key for the current comparison — the resolved commit pair (falls back to branch names). */
 	private pairKey(): string {
-		return `${this.baseCommit ?? this.base ?? ''}...${this.compareCommit ?? this.compare ?? ''}`;
+		return this.comparisonKey;
 	}
 
 	/**
@@ -225,7 +298,7 @@ export class ActiveComparison {
 	 * picking a different base/compare re-resolves → new shas → cache refetch.
 	 */
 	async getChangedFiles(): Promise<ChangedFile[]> {
-		if (!this.base || !this.compare) {
+		if (!this.baselineCommit || !this.compareCommit) {
 			return [];
 		}
 		const key = this.pairKey();
@@ -233,7 +306,7 @@ export class ActiveComparison {
 			return this.changedFilesValue;
 		}
 		const t = Date.now();
-		this.changedFilesValue = await changedFiles(this.repoRootFsPath, this.base, this.compare);
+		this.changedFilesValue = await changedFiles(this.repoRootFsPath, this.baselineCommit, this.compareCommit);
 		this.changedFilesKey = key;
 		perfCount('files.data-load', t, this.changedFilesValue.length);
 		return this.changedFilesValue;
@@ -241,27 +314,26 @@ export class ActiveComparison {
 
 	/**
 	 * CUMULATIVE changed files: committed-on-branch + staged + unstaged in one diff per file
-	 * (merge-base → working tree). Deliberately NOT memoized: unlike `getChangedFiles()`, this result
+	 * (effective baseline → working tree). Deliberately NOT memoized: unlike `getChangedFiles()`, this result
 	 * changes whenever the working tree changes, with no commit sha moving, so the `pairKey` memo
 	 * would serve a stale list forever. One extra `git diff --name-status` per render matches what
 	 * `changedFilesUncommitted()` already costs.
 	 *
-	 * Returns `[]` when there is no merge-base (unrelated histories) — the caller then falls back to
-	 * the non-cumulative path.
+	 * With no baseline the UI displays the resolution error instead of a branch comparison.
 	 */
 	async getChangedFilesCumulative(): Promise<ChangedFile[]> {
-		if (!this.mergeBaseCommit) {
+		if (!this.baselineCommit) {
 			return [];
 		}
 		const t = Date.now();
-		const files = await changedFilesCumulative(this.repoRootFsPath, this.mergeBaseCommit);
+		const files = await changedFilesCumulative(this.repoRootFsPath, this.baselineCommit);
 		perfCount('files.data-load-cumulative', t, files.length);
 		return files;
 	}
 
 	/** Commits in base..compare, memoized by the resolved commit pair (see getChangedFiles). */
 	async getCommits(): Promise<{ commits: CommitEntry[]; truncated: boolean }> {
-		if (!this.base || !this.compare) {
+		if (!this.baselineCommit || !this.compareCommit) {
 			return { commits: [], truncated: false };
 		}
 		const key = this.pairKey();
@@ -269,7 +341,7 @@ export class ActiveComparison {
 			return { commits: this.commitsValue, truncated: this.commitsTruncated };
 		}
 		const t = Date.now();
-		const result = await logRange(this.repoRootFsPath, this.base, this.compare);
+		const result = await logRange(this.repoRootFsPath, this.baselineCommit, this.compareCommit);
 		this.commitsValue = result.commits;
 		this.commitsTruncated = result.truncated;
 		this.commitsKey = key;

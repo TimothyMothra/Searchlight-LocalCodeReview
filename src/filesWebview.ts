@@ -266,13 +266,13 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		}
 		const hideUncommitted = isUncommittedHidden(this.workspaceState);
 		const active = this.getActive();
-		if (!active || !active.base || !active.compare) {
-			this.view.webview.postMessage({ type: 'state', tree: null, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
+		if (!active || !active.base || !active.compare || !active.baselineCommit) {
+			this.view.webview.postMessage({ type: 'state', tree: null, error: active?.baselineError, expanded: this.filesExpanded, hideUncommitted, ucHidden: 0, revealPath: this.revealPath, cumulative: false });
 			return;
 		}
 
-		// Same inline key form filesView.ts uses (ActiveComparison.pairKey is private).
-		const key = `${active.baseCommit ?? active.base}...${active.compareCommit ?? active.compare}`;
+		// ASSUMPTION: changing a pin/upstream can change the baseline without moving either branch.
+		const key = active.comparisonKey;
 
 		// CUMULATIVE mode: one diff per file covering committed-on-branch + staged + unstaged
 		// (merge-base → working tree). Only valid when `compare` IS the checked-out HEAD — the working
@@ -282,7 +282,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		if (
 			vscode.workspace.getConfiguration('searchlight').get<boolean>('files.cumulativeDiff', true) &&
 			active.compareIsHead &&
-			active.mergeBaseCommit
+			active.baselineCommit
 		) {
 			// Both are live working-tree state, so both are fetched fresh every render (no memo — see
 			// getChangedFilesCumulative). NOTE: a file added in a branch commit and then deleted in the
@@ -292,6 +292,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 				active.getChangedFilesCumulative(),
 				this.loadUncommitted(active),
 			]);
+			if (active.comparisonKey !== key) { return; }
 			const tBuildCum = Date.now();
 			const rows = cumulativeFiles(cum, uc, active.review?.reviewedFiles ?? []);
 			const ucTotalCum = rows.reduce((n, f) => (f.uncommitted ? n + 1 : n), 0);
@@ -323,6 +324,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 				active
 					.getChangedFiles()
 					.then((files) => {
+						if (active.comparisonKey !== key) { return; }
 						this.paths = files;
 						this.loadedKey = key;
 						this.loadingKey = undefined;
@@ -339,6 +341,7 @@ export class FilesWebviewProvider implements vscode.WebviewViewProvider {
 		// Uncommitted (staged/unstaged/untracked) is live working-tree state, independent of the
 		// base...compare pair — load it fresh on every render so edits appear without a key change.
 		const uc = await this.loadUncommitted(active);
+		if (active.comparisonKey !== key) { return; }
 		const tBuild = Date.now();
 		const merged = mergeFiles(this.paths, uc, active.review?.reviewedFiles ?? []);
 		const ucTotal = merged.reduce((n, f) => (f.uncommitted ? n + 1 : n), 0);
@@ -642,6 +645,7 @@ const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>'
 let expanded = new Set();      // relPaths of expanded folders
 let expandAll = false;
 let lastTree = null;           // WireDir | null | undefined(sentinel → loading)
+let comparisonError = null;
 let hideUncommitted = false;   // host-authoritative; drives the empty-state message
 let ucHidden = 0;              // count of uncommitted leaves the host filtered out
 let revealPath = null;         // relPath of the row mirroring the active editor (auto-reveal)
@@ -827,6 +831,11 @@ function paint() {
 	const t0 = performance.now();
 	rows.innerHTML = '';
 	revealedEl = null;
+	if (comparisonError) {
+		showMessage(comparisonError);
+		reportRendered('files', 0, t0);
+		return;
+	}
 	if (lastTree === undefined) {
 		showMessage('Loading changes…');
 		reportRendered('files', 0, t0);
@@ -856,6 +865,7 @@ function countFiles(dir) {
 window.addEventListener('message', (e) => {
 	const m = e.data;
 	if (m.type === 'state') {
+		comparisonError = m.error || null;
 		if (m.loading) {
 			lastTree = undefined;   // sentinel → "Loading changes…"
 		} else {

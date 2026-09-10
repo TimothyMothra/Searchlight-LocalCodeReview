@@ -66,11 +66,16 @@ export interface Worktree {
  */
 async function gitv(args: string[], cwd: string): Promise<string | undefined> {
 	try {
-		const { stdout } = await execFileAsync('git', args, { cwd, windowsHide: true });
-		return stdout.trim();
+		return await runGitQuery(cwd, args);
 	} catch {
 		return undefined;
 	}
+}
+
+/** Read-only queries whose failures must be surfaced rather than treated as empty results. */
+export async function runGitQuery(cwd: string, args: string[]): Promise<string> {
+	const { stdout } = await execFileAsync('git', args, { cwd, windowsHide: true });
+	return stdout.trim();
 }
 
 /** The repository root for `cwd` (`git rev-parse --show-toplevel`), or undefined. */
@@ -190,8 +195,9 @@ export interface ChangedFile {
 }
 
 /**
- * Files changed between `base` and `compare` using the symmetric-difference (three-dot) range
- * `git diff --name-status base...compare` — i.e. changes on `compare` since it diverged from `base`.
+ * Files changed between an already-resolved baseline commit and the compare commit.
+ * ASSUMPTION: callers resolve the effective baseline once; do not recompute a merge-base here,
+ * because an explicit baseline must be used exactly as selected.
  * `--name-status` is a single pass returning the same file list as `--name-only` plus a leading
  * status column (no extra git op). Returns `{ relPath, status }` per file, or `[]` on any failure.
  *
@@ -200,7 +206,7 @@ export interface ChangedFile {
  * status collapses to a single letter.
  */
 export async function changedFiles(cwd: string, base: string, compare: string): Promise<ChangedFile[]> {
-	const out = await gitv(['diff', '--name-status', `${base}...${compare}`], cwd);
+	const out = await gitv(['diff', '--name-status', base, compare, '--'], cwd);
 	if (!out) {
 		return [];
 	}
@@ -275,7 +281,7 @@ export async function logRange(
 
 /** Resolve a ref to its full commit sha (`git rev-parse <ref>`), or undefined on failure. */
 export async function resolveCommit(cwd: string, ref: string): Promise<string | undefined> {
-	return gitv(['rev-parse', ref], cwd);
+	return gitv(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], cwd);
 }
 
 /**

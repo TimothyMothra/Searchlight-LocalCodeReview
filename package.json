@@ -42,7 +42,7 @@
           "name": "Comparison",
           "type": "webview",
           "icon": "media/searchlight.svg",
-          "initialSize": 150
+          "initialSize": 230
         },
         {
           "id": "searchlight.files",
@@ -333,7 +333,7 @@
         "searchlight.files.cumulativeDiff": {
           "type": "boolean",
           "default": true,
-          "description": "When true, the Changed Files pane shows all committed AND uncommitted changes on the branch versus its merge-base with the base branch, as a single diff per file. Turn off to view committed and uncommitted changes separately. Only applies when the compare branch is the checked-out branch. Changes apply immediately — no reload needed."
+          "description": "When true, the Changed Files pane shows all committed AND uncommitted changes versus the effective baseline (automatic shared ancestor or pinned commit), as a single diff per file. Turn off to view committed and uncommitted changes separately. Only applies when the compare branch is the checked-out branch. Changes apply immediately — no reload needed."
         }
       }
     },
@@ -497,6 +497,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test scripts/comparison.test.cjs",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {

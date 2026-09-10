@@ -28,6 +28,7 @@ There are **no runtime dependencies** — the shipped extension is pure VS Code 
 ```powershell
 # 1. Compile TypeScript -> out/
 npm run compile
+npm test                        # compile + built-in Node comparison regression tests
 
 # 2. Package the VSIX (rebuilds the gitignored searchlight-0.0.1.vsix, ~26 files / ~65 KB)
 npx @vscode/vsce package
@@ -79,8 +80,8 @@ code --list-extensions --show-versions | Select-String searchlight
 - **No-shell git helpers ("KB-001").** `git.ts` uses `child_process` with an argv array (no shell),
   e.g. `listWorktreesCli` / `gitv`, to avoid flashing shell windows and reduce spawn overhead on the
   hot path.
-- **Memoized comparison.** `changedFiles` / `logRange` results are cached keyed by the resolved
-  commit pair, so view re-renders don't re-shell git.
+- **Memoized comparison.** `changedFiles` / `logRange` results are cached keyed by the effective
+  baseline/compare commit pair, so changing an upstream or pin invalidates the right results.
 - Turn on `searchlight.perfLogging` and watch the **Searchlight** OUTPUT channel to see `[perf]`
   timings.
 
@@ -117,6 +118,14 @@ comment or a stale-branch update can be exercised end-to-end without touching th
 | `typescript` | `^5.4` | compiler |
 
 No runtime dependencies — nothing ships in the VSIX beyond the compiled `out/`.
+
+## 10. Comparison regression coverage
+
+`npm test` compiles and runs `scripts/comparison.test.cjs` with Node's built-in test runner.
+The read-only Git-query fixtures cover advancing/stale target refs, rebases, stacked targets,
+explicit remote selection, ambiguous ancestry, pin persistence/reset/invalidation, and consistent
+baseline endpoints across file lists, commits and diff editors. They do not modify any Git refs,
+index, or working-tree files. No extension host or additional test dependency is required.
 
 ## 9. Known constraints
 

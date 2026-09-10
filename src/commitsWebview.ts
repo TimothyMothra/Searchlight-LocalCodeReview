@@ -110,13 +110,16 @@ export class CommitsWebviewProvider implements vscode.WebviewViewProvider {
 			return;
 		}
 		const active = this.getActive();
-		if (!active || !active.base || !active.compare) {
-			this.view.webview.postMessage({ type: 'state', commits: null, expanded: this.commitsExpanded });
+		if (!active || !active.base || !active.compare || !active.baselineCommit) {
+			this.view.webview.postMessage({ type: 'state', commits: null, error: active?.baselineError, expanded: this.commitsExpanded });
 			return;
 		}
 
+		// ASSUMPTION: a pin/ref change invalidates in-flight results even if branch names stay put.
+		const key = active.comparisonKey;
 		const tBuild = Date.now();
 		const { commits, truncated } = await active.getCommits();
+		if (key !== active.comparisonKey) { return; }
 		const wire: WireCommit[] = commits.map((c) => ({
 			sha: c.sha,
 			shortSha: c.shortSha,
@@ -215,6 +218,7 @@ const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>'
 const COPY_SVG = '<svg viewBox="0 0 16 16"><path d="M4 4V1.5L4.5 1h9l.5.5v9l-.5.5H11v2.5l-.5.5h-9L1 13.5v-9L1.5 4H4zm1 0h5.5l.5.5V9h2V2H5v2zM2 13h8V5H2v8z"/></svg>';
 
 let commits = null;      // WireCommit[] | null
+let comparisonError = null;
 let truncated = false;
 let expanded = new Set();          // shas of expanded commit rows
 let filesBySha = new Map();        // sha → string[] (changed files), 'loading' while pending
@@ -297,6 +301,14 @@ function renderCommit(c) {
 function paint() {
 	const t0 = performance.now();
 	rows.innerHTML = '';
+	if (comparisonError) {
+		const message = document.createElement('div');
+		message.className = 'msg';
+		message.textContent = comparisonError;
+		rows.appendChild(message);
+		reportRendered('commits', 0, t0);
+		return;
+	}
 	if (commits === undefined) {
 		rows.innerHTML = '<div class="msg">Loading commits…</div>';
 		reportRendered('commits', 0, t0);
@@ -325,6 +337,7 @@ function paint() {
 window.addEventListener('message', (e) => {
 	const m = e.data;
 	if (m.type === 'state') {
+		comparisonError = m.error || null;
 		commits = m.commits;               // WireCommit[] | null
 		truncated = !!m.truncated;
 		paint();

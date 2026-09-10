@@ -25,6 +25,7 @@ import {
 	aheadBehind,
 	fastForward,
 	fastForwardRef,
+	runGitQuery,
 } from './git';
 import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
@@ -83,7 +84,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// so the fix is to STOP blocking activation on git, not to make git faster. We construct
 	// `active` with a `wsFolder` placeholder for repoRoot and resolve the real root (plus
 	// computeDefaults/resolve/refreshAll) in the background IIFE at the end of activate().
-	const active = new ActiveComparison(wsFolder, wsFolder);
+	const active = new ActiveComparison(wsFolder, wsFolder, context.workspaceState);
 
 	// Inline comment threads. Constructed after `active` so new (first-ever) threads can target
 	// the currently-viewed comparison's review even before any comments.json exists on disk.
@@ -106,6 +107,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await updateStaleBranch(active, row, refreshAll, (ok, message) =>
 				comparisonProvider.postUpdateResult(row, ok, message),
 			);
+		},
+		async (reset) => {
+			// ASSUMPTION: pinning freezes a commit ID, never a moving branch expression.
+			const selectionKey = active.comparisonKey;
+			const value = reset ? undefined : await vscode.window.showInputBox({
+				title: 'Searchlight: Pin baseline commit',
+				prompt: 'Enter an ancestor commit SHA. The pin stays fixed until you choose Auto.',
+				value: active.baselinePin ?? active.baselineCommit,
+				ignoreFocusOut: true,
+			});
+			if (!reset && value === undefined) { return; }
+			try {
+				if (selectionKey !== active.comparisonKey) {
+					throw new Error('The comparison changed while entering a baseline. Try again.');
+				}
+				await active.setBaselinePin(value);
+				refreshAll();
+			} catch (error) {
+				void vscode.window.showErrorMessage(`Searchlight: ${errMessage(error)}`);
+			}
 		},
 	);
 	const commitsProvider = new CommitsWebviewProvider(() => active);
@@ -501,6 +522,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			headTimer = setTimeout(() => {
 				headTimer = undefined;
 				if (inFlight) {
+					// A ref update during resolution must trigger another pass, not be dropped.
+					onHeadChanged();
 					return;
 				}
 				inFlight = true;
@@ -527,16 +550,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		);
 		// Reveal whatever is already open, so a file open at activation doesn't wait for a tab switch.
 		filesProvider.revealForUri(vscode.window.activeTextEditor?.document.uri);
-		// Best-effort fallback for when the git API is unavailable. Rooted at the repo so it also
-		// works for a worktree (whose `.git` is a FILE pointing at the real gitdir); a worktree's HEAD
-		// still lives at `<worktree>/.git/HEAD` only when `.git` is a directory, so this is a
-		// supplement to — not a replacement for — the API subscription above.
-		const headWatcher = vscode.workspace.createFileSystemWatcher(
-			new vscode.RelativePattern(vscode.Uri.file(repoRoot), '.git/HEAD'),
-		);
-		headWatcher.onDidChange(onHeadChanged);
-		headWatcher.onDidCreate(onHeadChanged);
-		context.subscriptions.push(headWatcher);
+		// ASSUMPTION: linked worktrees share target refs but have their own HEAD. Ask git for
+		// both locations so rebases, fetches and updates from another worktree all refresh the base.
+		try {
+			const [headPath, commonDir] = await Promise.all([
+				runGitQuery(repoRoot, ['rev-parse', '--git-path', 'HEAD']),
+				runGitQuery(repoRoot, ['rev-parse', '--git-common-dir']),
+			]);
+			const absoluteHead = path.resolve(repoRoot, headPath);
+			const patterns = [
+				new vscode.RelativePattern(vscode.Uri.file(path.dirname(absoluteHead)), path.basename(absoluteHead)),
+				new vscode.RelativePattern(vscode.Uri.file(path.resolve(repoRoot, commonDir)), '{refs/**,packed-refs}'),
+			];
+			for (const pattern of patterns) {
+				const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+				watcher.onDidChange(onHeadChanged);
+				watcher.onDidCreate(onHeadChanged);
+				watcher.onDidDelete(onHeadChanged);
+				context.subscriptions.push(watcher);
+			}
+		} catch (error) {
+			log(`Could not watch comparison refs: ${errMessage(error)}`);
+			void vscode.window.showWarningMessage('Searchlight: ref watching is unavailable. Use Refresh after updating branches.');
+		}
 
 		perf('background init total', tBg);
 	})();

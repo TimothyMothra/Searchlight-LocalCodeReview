@@ -37,6 +37,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 		private readonly onSelectBase: (branch: string) => void | Promise<void>,
 		private readonly onSelectCompare: (branch: string) => void | Promise<void>,
 		private readonly onPull: (row: Row) => void | Promise<void>,
+		private readonly onBaseline: (reset: boolean) => void | Promise<void>,
 	) {}
 
 	/** Kept named `refresh` so the extension's `refreshAll` closure is unchanged. */
@@ -111,6 +112,12 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 				case 'pullCompare':
 					await this.onPull('compare');
 					break;
+				case 'pinBaseline':
+					await this.onBaseline(false);
+					break;
+				case 'autoBaseline':
+					await this.onBaseline(true);
+					break;
 			}
 		});
 		void this.postState();
@@ -166,10 +173,14 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 			branches,
 			base,
 			compare,
+			baselineCommit: active.baselineCommit ?? null,
+			baselinePin: active.baselinePin ?? null,
+			baselineReason: active.baselineReason,
+			baselineError: active.baselineError ?? null,
 			headBranch: headBranch ?? null,
 			baseStale: baseStale ?? null,
 			compareStale: compareStale ?? null,
-			ready: !!(base && compare && base !== compare),
+			ready: !!(base && compare && active.baselineCommit),
 			sameBranch: !!(base && compare && base === compare),
 		});
 	}
@@ -300,6 +311,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
   }
   .status-bar.ok { color: var(--vscode-testing-iconPassed, #3fb950); }
   .status-bar.warn { color: var(--vscode-editorWarning-foreground, #d29922); }
+  .baseline-detail { margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; color: var(--vscode-descriptionForeground); }
   .warn-tri { color: var(--vscode-editorWarning-foreground, #d29922); margin-left: 4px; }
   .pull-btn:disabled { opacity: 0.85; cursor: default; }
   .spinner {
@@ -317,7 +329,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="field" data-row="base">
-    <label class="field-label">Base (target)</label>
+    <label class="field-label">Target branch</label>
     <div class="field-row">
       <input class="branch-input" data-row="base" type="text" placeholder="Select base branch…" autocomplete="off" spellcheck="false" />
       <button class="pull-btn" data-row="base" title="Fetch + fast-forward this branch to its upstream">↻ Update</button>
@@ -334,7 +346,16 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
     <div class="dropdown" data-row="compare"></div>
   </div>
 
-  <div class="status-bar" id="status"></div>
+  <div class="field">
+    <label class="field-label">Effective baseline</label>
+    <div class="field-row">
+      <span id="baseline" style="flex: 1; overflow-wrap: anywhere;">Not resolved</span>
+      <button class="icon-btn" id="pin-baseline" title="Use an explicit ancestor commit as the baseline">Pin commit...</button>
+      <button class="icon-btn" id="auto-baseline" title="Clear the pin and resolve shared ancestry automatically">Auto</button>
+    </div>
+    <div class="baseline-detail" id="baseline-reason"></div>
+  </div>
+  <div class="status-bar" id="status" role="status"></div>
 
 <script>
   const vscode = acquireVsCodeApi();
@@ -356,6 +377,8 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
     compare: document.querySelector('.pull-btn[data-row="compare"]'),
   };
   const statusEl = document.getElementById('status');
+  document.getElementById('pin-baseline').addEventListener('click', () => vscode.postMessage({ type: 'pinBaseline' }));
+  document.getElementById('auto-baseline').addEventListener('click', () => vscode.postMessage({ type: 'autoBaseline' }));
 
   // Per-row UI state: last-known stale info and last-known update error (for the ⚠ triangle).
   const staleState = { base: null, compare: null };
@@ -480,7 +503,18 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   function renderStatus(state) {
-    if (state.sameBranch) {
+    const baseline = document.getElementById('baseline');
+    baseline.textContent = state.baselineCommit
+      ? state.baselineCommit.slice(0, 12) + (state.baselinePin ? ' (pinned)' : ' (auto)')
+      : (state.baselinePin ? state.baselinePin.slice(0, 12) + ' (invalid pin)' : 'Not resolved');
+    baseline.title = state.baselineCommit || state.baselinePin || '';
+    document.getElementById('baseline-reason').textContent = state.baselineReason || '';
+    document.getElementById('pin-baseline').disabled = !state.base || !state.compare;
+    document.getElementById('auto-baseline').disabled = !state.baselinePin;
+    if (state.baselineError) {
+      statusEl.className = 'status-bar warn';
+      statusEl.textContent = state.baselineError;
+    } else if (state.sameBranch && !state.baselinePin) {
       statusEl.className = 'status-bar warn';
       statusEl.textContent = '⚠ Same branch selected';
     } else if (state.ready) {

@@ -49,6 +49,7 @@ import { setComparisonSettled, paneSnapshot, resetPaneMetrics } from './webviewM
 import { initUsage, setUsageEnabled, recordUsage, usageEditor, usageFocus, usageSnapshot, emitUsageSummary } from './usage';
 import { classifyEditorInput, editorInputIdentity } from './usageContext';
 import { ConversationDocumentProvider, CONVERSATION_SCHEME } from './conversationDocument';
+import { ConversationPages, CONVERSATION_PAGE_TYPE } from './conversationPage';
 
 /** Shared "Searchlight" output channel for user-visible git/action feedback. Assigned in `activate`. */
 let outputChannel: vscode.OutputChannel | undefined;
@@ -95,7 +96,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		// ASSUMPTION: VS Code may recreate Tab/input objects for unrelated updates. Compare stable
 		// input values instead; the private key stays in memory and never reaches usage records.
 		const identity = editorInputIdentity(tab?.input);
-		const editorKey = JSON.stringify([group.viewColumn, identity, identity === 'other' ? tab?.label : undefined]);
+		const editorKey = JSON.stringify([group.viewColumn, identity, identity === 'other' || identity.startsWith('view:') ? tab?.label : undefined]);
 		usageEditor(classifyEditorInput(tab?.input));
 		if (initial || editorKey !== lastEditorKey) {
 			recordUsage(initial ? 'editor.observed' : 'editor.changed');
@@ -338,6 +339,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		void trace('refresh.dispatch', async () => {
 			event('refresh.request', { reason });
 			if (reason === 'manual-refresh' || reason === 'manual-resolve-refresh') { conversationDocuments.refresh(); }
+			if (reason === 'manual-refresh' || reason === 'manual-resolve-refresh') { conversationPages.refresh(); }
 			comparisonProvider.refresh(['manual-refresh', 'manual-resolve-refresh', 'git-operation'].includes(reason));
 			filesProvider.refresh();
 			commitsProvider.refresh();
@@ -355,16 +357,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		),
 	);
 	const conversationDocuments = new ConversationDocumentProvider();
+	const conversationPages = new ConversationPages({
+		changed: async () => {
+			await active.reloadReview();
+			refreshAll('conversation-page');
+			conversationDocuments.refresh();
+			conversationPages.refresh();
+		},
+		askCopilot: (reviewFile, threadId) => askCopilot(path.dirname(reviewFile), threadId),
+		openCode: async (thread) => {
+			if (thread.filePath) {
+				await vscode.commands.executeCommand('searchlight.openThreadLocation', thread.filePath, thread.startLine ?? 1, thread.endLine ?? thread.startLine ?? 1);
+			}
+		},
+	});
 	context.subscriptions.push(
 		conversationDocuments,
+		conversationPages,
 		vscode.workspace.registerTextDocumentContentProvider(CONVERSATION_SCHEME, conversationDocuments),
+		vscode.window.registerWebviewPanelSerializer(CONVERSATION_PAGE_TYPE, conversationPages),
 		registerCommand('searchlight.viewConversation', async (target: unknown) => {
 			try {
-				await conversationDocuments.open(target);
+				await conversationPages.open(target);
 			} catch (error) {
 				void vscode.window.showErrorMessage(`Searchlight: ${errMessage(error)}`);
 				throw error;
 			}
+		}),
+		registerCommand('searchlight.newConversation', async () => {
+			if (!active.review) {
+				void vscode.window.showWarningMessage('Searchlight: select a source and target branch before starting a thread.');
+				return;
+			}
+			await conversationPages.openNew({
+				...active.review, sourceBranch: active.compare ?? active.review.sourceBranch,
+				targetBranch: active.base ?? active.review.targetBranch,
+			});
 		}),
 	);
 
@@ -642,6 +670,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 	const refreshReviews = (uri: vscode.Uri, reason: string): void => {
 		conversationDocuments.refresh(uri);
+		conversationPages.refresh(uri);
 		void active.reloadReview().then(() => refreshAll(reason)).catch((error) => {
 			log(`Could not refresh saved reviews: ${errMessage(error)}`);
 		});
@@ -779,7 +808,8 @@ function askCopilot(reviewDir: string, threadId: string | undefined): void {
 	const prompt =
 		`Respond to ${target}. Read comments.json, reply in-thread per the schema ` +
 		`(v2: author object, tags[], replyTo), stamp your identity as ~Written by 🤖 Copilot, ` +
-		`and set thread state appropriately.`;
+		`and set thread state appropriately. Threads without filePath are review-wide threads; ` +
+		`answer their messages without inventing a code location.`;
 
 	const terminal = vscode.window.createTerminal({ name: 'Searchlight · Copilot', cwd: reviewDir });
 	terminal.show();

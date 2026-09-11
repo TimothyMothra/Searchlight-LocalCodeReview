@@ -373,6 +373,7 @@ test('early activation exposes comments without Git; first pane requests share l
 			onDidChangeWindowState: disposable,
 			createOutputChannel: () => channel,
 			registerWebviewViewProvider: (id, provider) => { panes.set(id, provider); return disposable(); },
+			registerWebviewPanelSerializer: disposable,
 			onDidChangeActiveTextEditor: disposable, showSaveDialog: async () => ({ fsPath: 'fixture-export' }),
 			showInformationMessage: noop, showErrorMessage: (message) => assert.fail(message),
 		},
@@ -407,6 +408,10 @@ test('early activation exposes comments without Git; first pane requests share l
 		'./conversationDocument': {
 			CONVERSATION_SCHEME: 'searchlight-conversation',
 			ConversationDocumentProvider: class { open() { conversationOpens++; } refresh() {} dispose() {} },
+		},
+		'./conversationPage': {
+			CONVERSATION_PAGE_TYPE: 'searchlight.conversationPage',
+			ConversationPages: class { open() { conversationOpens++; } openNew() {} refresh() {} dispose() {} },
 		},
 	});
 	const context = {

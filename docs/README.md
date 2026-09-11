@@ -2,7 +2,7 @@
 
 **Searchlight: Local Code Review** is a VS Code extension for reviewing local git branch diffs the
 way you'd review a pull request — but entirely offline, with review comments stored as plain JSON on
-disk. It adds a four-view "PR panel" (Comparison, Commits, Changed Files, Conversations), native
+disk. It adds a four-view "PR panel" (Comparison, Commits, Changed Files, Threads), native
 inline comment threads, `/tag` classification, and a one-click **Ask Copilot** bridge that hands a
 review thread to the `copilot` CLI so an agent can reply in-thread and stamp its identity.
 
@@ -25,9 +25,17 @@ For feature adoption and Source Control/discussion workflows, see
 [Local feature usage](usage-diagnostics.md).
 
 The default layout keeps Comparison and Commits collapsed at the top, expands all folders in
-Changed Files initially, and hides resolved Conversations. Saved VS Code pane layouts and explicit
+Changed Files initially, and hides resolved threads. Saved VS Code pane layouts and explicit
 Show Resolved choices are preserved. The all-changes diff command remains available in the Command
 Palette, but is no longer a Changed Files toolbar button.
+
+Use **New Thread** in Threads for review-wide messages without a code location.
+**Read** opens a formatted discussion page with replies and explicit Copilot controls, while
+ordinary clicks on code-linked discussions still navigate to code.
+
+Thread-page buttons pair a decorative icon with a visible title. Resolve/Reopen share the pane's
+checkbox icons; Refresh uses a circular arrow. Agent metadata stays inline with the author name.
+Existing `conversation`-named command IDs, settings and storage remain compatible.
 
 ## 30-second orientation
 

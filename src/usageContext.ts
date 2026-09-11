@@ -31,6 +31,7 @@ export function editorInputIdentity(input: unknown): string {
 export function classifyEditorInput(input: unknown): EditorContext {
 	if (input === undefined || input === null) { return 'none'; }
 	if (typeof input !== 'object') { return 'other'; }
+	if ('viewType' in input && input.viewType === 'searchlight.conversationPage') { return 'searchlight-conversation'; }
 	if ('original' in input && 'modified' in input) {
 		const schemes = [scheme(input.original), scheme(input.modified)];
 		if (schemes.includes('searchlight-diff')) { return 'searchlight-diff'; }

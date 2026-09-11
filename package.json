@@ -18,6 +18,7 @@
   ],
   "activationEvents": [
     "onStartupFinished",
+    "onWebviewPanel:searchlight.conversationPage",
     "workspaceContains:.vscode/searchlight-reviews/**/comments.json"
   ],
   "main": "./out/extension.js",
@@ -63,7 +64,7 @@
         },
         {
           "id": "searchlight.conversations",
-          "name": "Conversations",
+          "name": "Threads",
           "type": "webview",
           "icon": "media/searchlight.svg",
           "initialSize": 200
@@ -81,13 +82,18 @@
       },
       {
         "view": "searchlight.conversations",
-        "contents": "No conversations yet. Open a changed file and add a comment to start one."
+        "contents": "No threads yet. Start a review-wide thread or add a comment to a changed file."
       }
     ],
     "commands": [
       {
+        "command": "searchlight.newConversation",
+        "title": "Searchlight: New Thread",
+        "icon": "$(add)"
+      },
+      {
         "command": "searchlight.viewConversation",
-        "title": "Searchlight: Read Conversation"
+        "title": "Searchlight: Read Thread"
       },
       {
         "command": "searchlight.exportStartupDiagnostics",
@@ -235,12 +241,12 @@
       },
       {
         "command": "searchlight.conversationsHideResolved",
-        "title": "Searchlight: Hide Resolved Conversations",
+        "title": "Searchlight: Hide Resolved Threads",
         "icon": "$(eye)"
       },
       {
         "command": "searchlight.conversationsShowResolved",
-        "title": "Searchlight: Show Resolved Conversations",
+        "title": "Searchlight: Show Resolved Threads",
         "icon": "$(eye-closed)"
       },
       {
@@ -355,6 +361,11 @@
     },
     "menus": {
       "view/title": [
+        {
+          "command": "searchlight.newConversation",
+          "when": "view == searchlight.conversations",
+          "group": "navigation@-1"
+        },
         {
           "command": "searchlight.copyCompareBranch",
           "when": "view == searchlight.comparison",
@@ -512,13 +523,17 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "test": "npm run compile && node --test scripts/comparison.test.cjs scripts/diagnostics.test.cjs scripts/usage.test.cjs scripts/usage-integration.test.cjs scripts/conversation.test.cjs scripts/review-discovery.test.cjs scripts/pane-defaults.test.cjs",
+    "test": "npm run compile && node --test scripts/comparison.test.cjs scripts/diagnostics.test.cjs scripts/usage.test.cjs scripts/usage-integration.test.cjs scripts/conversation.test.cjs scripts/review-discovery.test.cjs scripts/pane-defaults.test.cjs scripts/conversation-page.test.cjs",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "markdown-it": "^14.3.1"
   }
 }

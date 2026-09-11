@@ -10,7 +10,9 @@ repo root `C:\REPOS\searchlight-localcodereview`.
 - **`@vscode/vsce`** for packaging (a dev dependency; no global install needed).
 - **git** on `PATH`.
 
-There are **no runtime dependencies** — the shipped extension is pure VS Code API + Node stdlib.
+The conversation page uses `markdown-it` at runtime for safe Markdown formatting. It is loaded
+lazily, not on the startup critical path. VSCE includes production dependencies; do not exclude
+all of `node_modules` from the VSIX.
 
 ## 2. Layout
 
@@ -121,7 +123,8 @@ comment or a stale-branch update can be exercised end-to-end without touching th
 | `@vscode/vsce` | `^3.9.2` | packaging |
 | `typescript` | `^5.4` | compiler |
 
-No runtime dependencies — nothing ships in the VSIX beyond the compiled `out/`.
+Production dependencies for the conversation renderer ship with the compiled `out/`; dev-only
+tooling and TypeScript declarations used solely for development are not runtime requirements.
 
 ## 10. Comparison regression coverage
 
@@ -140,6 +143,8 @@ failures, in-flight sharing and linked-directory cycle avoidance. Branch tests c
 unambiguous catalogs, batched shortening exceptions and older Git capability fallback.
 `pane-defaults.test.cjs` covers pane order/collapse contributions, toolbar removal, initial Files
 expansion without repeated refresh overrides, and the persisted resolved-thread visibility toggle.
+`conversation-page.test.cjs` covers review-wide topics, safe Markdown, lazy first persistence,
+queued/guarded updates, explicit Copilot launch, deleted-code independence and draft/reference restoration.
 The read-only Git-query fixtures cover advancing/stale target refs, rebases, stacked targets,
 explicit remote selection, ambiguous ancestry, pin persistence/reset/invalidation, and consistent
 baseline endpoints across file lists, commits and diff editors. They do not modify any Git refs,

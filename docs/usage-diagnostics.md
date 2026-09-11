@@ -16,6 +16,7 @@ or usage data written into the repository.
 | Discussion created/replied/resolved/reopened | Successful persistence of a discussion mutation, separately from command invocation |
 | Discussion exposed | Existing threads attached to currently visible editors; repeated unchanged reconciliation is not counted again |
 | Read conversation | `viewConversation` pane action / `searchlight.viewConversation` command, independent of code navigation |
+| Formal conversation page | New conversation, post message, Ask Copilot, quote/copy-code and refresh actions; successful message mutations remain separately counted |
 
 All four panes appear in the summary, even when never opened. In particular, a visible Commits pane
 with zero commit actions is different from actively using commit inspection. Passive rendering,
@@ -32,8 +33,9 @@ file. A diff containing `git://` content is classified as `git-diff`; a diff con
 `searchlight-diff://` content is `searchlight-diff`. Ordinary files (including an untracked file
 opened from Source Control) remain `text-editor`: the extension does not guess their origin.
 Unsupported editor types are `other`, rather than being attributed to Source Control.
-Read-only conversation tabs have their own `searchlight-conversation` editor context so reading
-Copilot responses is not misclassified as inspecting code.
+Conversation pages and legacy transcript tabs have their own `searchlight-conversation` editor
+context so reading/replying to Copilot is not misclassified as inspecting code. Draft text is local
+webview state, not usage-log metadata.
 
 Use command-start events to associate a discussion action with its editor context at invocation.
 An async command can finish after the user changes editors, so completion/mutation context may

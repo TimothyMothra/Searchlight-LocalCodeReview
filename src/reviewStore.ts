@@ -183,6 +183,7 @@ function serializeComment(comment: ReviewComment): Record<string, unknown> {
 function serializeThread(thread: ReviewThread): Record<string, unknown> {
 	return {
 		id: thread.id ?? newId('t'),
+		...(thread.title ? { title: thread.title } : {}),
 		filePath: thread.filePath,
 		startLine: thread.startLine,
 		endLine: thread.endLine ?? thread.startLine,
@@ -255,10 +256,12 @@ export function emptyReview(
 }
 
 /** Persist a Review to its `sourceFile` as canonical v2 JSON. */
-export async function saveReview(review: Review): Promise<void> {
+export async function saveReview(review: Review, beforeWrite?: () => Promise<void>): Promise<void> {
 	const obj = serializeReview(review);
 	const text = JSON.stringify(obj, null, 2) + '\n';
 	const uri = vscode.Uri.file(review.sourceFile);
+	await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(review.sourceFile)));
+	await beforeWrite?.();
 	await vscode.workspace.fs.writeFile(uri, Buffer.from(text, 'utf8'));
 }
 
@@ -350,9 +353,9 @@ export function addThreadTags(review: Review, threadId: string, tags: string[]):
 /** Create a brand-new thread (with a first comment) at a file location. Returns the thread. */
 export function addThread(
 	review: Review,
-	filePath: string,
-	startLine: number,
-	endLine: number,
+	filePath: string | undefined,
+	startLine: number | undefined,
+	endLine: number | undefined,
 	body: string,
 	author: ReviewAuthor,
 	tags: string[] = [],
@@ -381,5 +384,12 @@ export function addThread(
 		],
 	};
 	review.threads.push(thread);
+	return thread;
+}
+
+/** A review-wide topic deliberately has no fake filename, range, or code anchor. */
+export function addGeneralThread(review: Review, body: string, author: ReviewAuthor, title?: string): ReviewThread {
+	const thread = addThread(review, undefined, undefined, undefined, body, author);
+	if (title?.trim()) { thread.title = title.trim(); }
 	return thread;
 }

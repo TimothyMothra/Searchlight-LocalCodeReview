@@ -38,6 +38,10 @@ extension.ts ............ activation, view wiring, command registration, Ask-Cop
   ├─ conversationsView.ts . TreeView: reviews -> threads -> comments, jump to file:line
   ├─ conversationDocument.ts . read-only virtual conversation tabs, independent of code files
   ├─ conversationModel.ts .... full transcript formatting and stable conversation references
+  ├─ conversationPage.ts ..... formal discussion pages, composers and explicit Copilot actions
+  ├─ conversationPageStore.ts  scoped references, draft seeds and guarded review mutations
+  ├─ conversationPageModel.ts  lazily loaded safe Markdown rendering and page state
+  ├─ conversationPageHtml.ts . themed conversation workspace and draft-preserving client
   ├─ commentController.ts . native vscode.comments threads (inline gutter UI)
   ├─ reviewDiff.ts ........ ReviewDiffContentProvider serving historical blobs for diffs
   ├─ tagCompletion.ts ..... /tag CompletionItemProvider for the comment input
@@ -59,7 +63,7 @@ supplied via a `() => active` getter:
 | 1 | Comparison (`searchlight.comparison`) | Collapsed | Inline branch selectors and Pull/Update controls |
 | 2 | Commits (`searchlight.commits`) | Collapsed | Commit/file inspection and copy-SHA |
 | 3 | Changed Files (`searchlight.files`) | All folders initially expanded | Changed files and reviewed-file checkboxes; no all-changes toolbar button |
-| 4 | Conversations (`searchlight.conversations`) | Resolved threads hidden | Inline-code navigation, Read transcript, resolve/reopen controls |
+| 4 | Threads (`searchlight.conversations`) | Resolved threads hidden | Inline-code navigation, Read thread, resolve/reopen controls |
 
 All four are WebviewViews. The Comparison view originally
 used a two-row TreeView whose rows fired `showQuickPick()`. The resulting top-center popup was
@@ -181,24 +185,40 @@ local trace without waiting for pending work. See [Startup diagnostics](startup-
 It re-renders from disk on demand, so the file watcher can call it after **any** external change —
 including this extension's own writes and the `copilot` CLI shell-out.
 
-### Reading discussions after code disappears
+### Thread workspace and review-wide topics
 
-In Conversations, clicking a thread or reply defaults to the code location. **Read** opens a
-read-only Markdown transcript in an editor tab, even if the code file is gone. Threads without a
-recorded file location default to the transcript. **Code** also jumps to the file. Reading never resolves a
-thread and never requires opening the source file or recovering a Git blob.
+The Threads title bar and empty state offer **New Thread**. It opens a draft attached
+to the current branch review, not a code location. Nothing is written until the first message is
+posted. These topics have an optional subject and omit `filePath`, line ranges and anchors entirely;
+they are not fake comments on line zero. Existing inline comments remain code-linked.
 
-The transcript includes every saved reply (including full Copilot responses), author/model
-details, original location, and any captured anchor line. A deleted uncommitted file may never
-have existed in Git: the saved anchor is explicitly labeled as a single trimmed line, not a full
-historical file/diff. Missing anchor text is reported rather than invented. An unavailable anchor
-does not dim or hide the discussion.
+User-facing entity names are consistently Thread/Threads. Existing internal conversation IDs
+are retained so saved layouts, commands, references and telemetry remain compatible. Buttons show
+an icon followed by their visible label; decorative SVGs are hidden from assistive technology.
 
-`searchlight-conversation` documents are backed by review data, not files written to the
-workspace. Stable-ID conversations refresh when their review file changes, including external
-Copilot responses. Open tabs retain a clearly labeled last-known transcript if the review data
-temporarily becomes unavailable. Legacy threads without IDs use fingerprinted snapshots so
-reordering cannot silently switch an open tab to a different discussion.
+Clicking a code-linked thread/reply still navigates to code. **Read**, or clicking a review-wide
+topic, now opens a dedicated WebviewPanel rather than Markdown source. The page shows formatted
+messages/code blocks, human/agent attribution, a reply composer, Resolve/Reopen and explicit
+Ask Copilot controls. Saved code context is optional; missing/deleted/uncommitted files never
+prevent reading or replying. The saved anchor is not presented as a reconstructed historical file.
+
+**Post** saves locally; **Post & Ask Copilot** saves first, then launches the existing external CLI.
+No model runs automatically and no streaming response is fabricated. External saved replies update
+the open page without replacing the draft. Resolved threads are not silently reopened by replies.
+Draft text is kept in the panel's local VS Code webview state; restored pages retain their original
+review identity even if a different branch is now active.
+
+Page writes are queued per review, reload current data, and check for observed external edits
+immediately before writing. Conflicts retain the draft rather than overwriting the observed edit.
+VS Code's file API does not offer cross-process compare-and-swap, so this is not a transactional
+lock against arbitrary external writers. Invalid/missing existing review data is never replaced
+with an empty review. First messages create missing review directories lazily.
+
+Markdown rendering is loaded only when messages need formatting. Raw HTML is disabled, remote
+images are omitted, and link clicks are routed through an HTTP/HTTPS-only host handler under a
+nonce-based CSP. The old read-only `searchlight-conversation` document provider remains registered
+for existing/restored transcript tabs. Legacy threads without stable IDs remain readable but cannot
+be mutated through the new page.
 
 ## 7. The Ask-Copilot bridge (schema → agent contract)
 

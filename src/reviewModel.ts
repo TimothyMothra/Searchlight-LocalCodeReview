@@ -36,6 +36,8 @@ export interface ReviewComment {
 
 export interface ReviewThread {
 	id?: string;
+	/** Optional subject for a review-wide conversation; no file/line fields are required. */
+	title?: string;
 	/** Repo-relative path with forward slashes, per the schema. */
 	filePath?: string;
 	startLine?: number;
@@ -231,6 +233,7 @@ function parseThread(raw: unknown): ReviewThread {
 	const comments = Array.isArray(o.comments) ? o.comments.map(parseComment) : [];
 	return {
 		id: typeof o.id === 'string' ? o.id : undefined,
+		title: typeof o.title === 'string' ? o.title : undefined,
 		filePath: typeof o.filePath === 'string' ? o.filePath : undefined,
 		startLine: typeof o.startLine === 'number' ? o.startLine : undefined,
 		endLine: typeof o.endLine === 'number' ? o.endLine : undefined,

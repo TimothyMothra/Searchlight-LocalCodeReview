@@ -19,6 +19,11 @@ export function conversationTarget(reviewFile: string, thread: ReviewThread, ind
 	};
 }
 
+export function findConversationThread(review: Review, target: ConversationTarget): ReviewThread | undefined {
+	return target.threadId ? review.threads.find((thread) => thread.id === target.threadId)
+		: review.threads.find((thread) => thread.seq === target.seq && conversationFingerprint(thread) === target.legacyFingerprint);
+}
+
 function inline(text: string): string {
 	return text.replace(/[\r\n]+/g, ' ').replace(/[\\`*_{}\[\]()<>#|]/g, '\\$&');
 }
@@ -35,8 +40,8 @@ export function formatConversation(review: Review, thread: ReviewThread, seq: nu
 		? `${thread.filePath}:${thread.startLine ?? 1}${thread.endLine !== undefined && thread.endLine !== thread.startLine ? `-${thread.endLine}` : ''}`
 		: 'No file location was recorded.';
 	const lines = [
-		`# Conversation #${String(seq).padStart(2, '0')}`, '',
-		'Read-only conversation transcript. Reading it does not resolve or modify the discussion.', '',
+		`# Thread #${String(seq).padStart(2, '0')}${thread.title ? `: ${inline(thread.title)}` : ''}`, '',
+		'Read-only thread transcript. Reading it does not resolve or modify the thread.', '',
 		`**Status:** ${inline(thread.state ?? 'unresolved')}`,
 		`**Original code location:** ${inline(location)}`,
 		`**Review:** ${inline(review.sourceBranch ?? '(unknown source)')} -> ${inline(review.targetBranch ?? '(unknown target)')}`,
@@ -49,7 +54,7 @@ export function formatConversation(review: Review, thread: ReviewThread, seq: nu
 			'This is only the saved anchor, not a snapshot of the whole file or uncommitted diff.',
 		);
 	} else {
-		lines.push('No code anchor was saved for this conversation.');
+		lines.push('No code anchor was saved for this thread.');
 	}
 	lines.push(
 		'',

@@ -114,7 +114,7 @@ test('conversation tabs read only saved review data, refresh on replies, and pre
 		assert.match(cached, /last successfully loaded transcript/);
 		assert.match(cached, /newly saved Copilot response/);
 		f.close(document.uri);
-		await assert.rejects(f.provider.provideTextDocumentContent(document.uri), /saved conversation is unavailable/);
+		await assert.rejects(f.provider.provideTextDocumentContent(document.uri), /saved thread is unavailable/);
 	} finally { f.provider.dispose(); }
 });
 
@@ -128,7 +128,7 @@ test('stable IDs never fall back to another thread, and identical IDs in differe
 		await f.provider.open(conversationTarget(f.review.sourceFile, f.review.threads[0], 0));
 		assert.notEqual(f.shown[0].document.uri.toString(), f.shown[1].document.uri.toString());
 		const bad = { ...originalTarget, threadId: 'unknown-id' };
-		await assert.rejects(f.provider.provideTextDocumentContent(f.uri(bad)), /saved conversation is unavailable/);
+		await assert.rejects(f.provider.provideTextDocumentContent(f.uri(bad)), /saved thread is unavailable/);
 	} finally { f.provider.dispose(); }
 });
 
@@ -139,11 +139,11 @@ test('legacy snapshots cannot silently change identity after reordered or edited
 		const target = conversationTarget(f.review.sourceFile, f.review.threads[0], 0);
 		const uri = f.uri(target);
 		const first = await f.provider.provideTextDocumentContent(uri);
-		assert.match(first, /Legacy conversation snapshot/);
+		assert.match(first, /Legacy thread snapshot/);
 		f.review.threads[0].comments[0].body = 'Different legacy thread at this sequence';
 		assert.equal(await f.provider.provideTextDocumentContent(uri), first);
 		f.close(uri);
-		await assert.rejects(f.provider.provideTextDocumentContent(uri), /saved conversation is unavailable/);
+		await assert.rejects(f.provider.provideTextDocumentContent(uri), /saved thread is unavailable/);
 	} finally { f.provider.dispose(); }
 });
 

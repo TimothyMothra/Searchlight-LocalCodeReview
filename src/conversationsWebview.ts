@@ -28,6 +28,7 @@ import { webviewHtml, getNonce } from './webviewShell';
 import { logBuild, PaneMetrics } from './webviewMetrics';
 import { now, trace } from './diagnostics';
 import { ConversationTarget, conversationTarget } from './conversationModel';
+import { THREAD_ICONS } from './threadIcons';
 
 /** A comment row in the serializable payload sent to the webview. */
 interface WireComment {
@@ -41,6 +42,7 @@ interface WireComment {
 /** A thread row in the serializable payload sent to the webview. */
 interface WireThread {
 	target: ConversationTarget;
+	title?: string;
 	num: string; // seq (or index+1), zero-padded to 2 digits
 	loc: string; // `filePath:line` or '(no file)'
 	desc: string; // state + #tags text (mirrors the native description)
@@ -56,6 +58,7 @@ interface WireThread {
 
 type IncomingMessage =
 	| { type: 'ready' }
+	| { type: 'newConversation' }
 	| { type: 'viewConversation'; target: ConversationTarget }
 	| { type: 'navigate'; filePath: string; startLine: number; endLine: number }
 	| { type: 'resolve'; threadId: string }
@@ -107,6 +110,9 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 					break;
 				case 'viewConversation':
 					await vscode.commands.executeCommand('searchlight.viewConversation', msg.target);
+					break;
+				case 'newConversation':
+					await vscode.commands.executeCommand('searchlight.newConversation');
 					break;
 				case 'navigate':
 					if (msg.filePath) {
@@ -254,10 +260,11 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 			}
 		}
 
-		const loc = thread.filePath ? `${thread.filePath}:${navStart}` : '(no file)';
+		const loc = thread.filePath ? `${thread.filePath}:${navStart}` : 'Review-wide';
 
 		return {
 			target: conversationTarget(reviewFile, thread, index),
+			title: thread.title || (!thread.filePath ? thread.comments[0]?.body.split('\n')[0] : undefined),
 			num,
 			loc,
 			desc: bits.join('  '),
@@ -310,6 +317,11 @@ export class ConversationsWebviewProvider implements vscode.WebviewViewProvider 
 const CONVERSATIONS_CSS = `
 #rows { user-select: none; }
 .msg { padding: 6px 12px; color: var(--vscode-descriptionForeground); }
+.new-conversation {
+	display: inline-flex; align-items: center; gap: 4px;
+	margin: 8px 12px; padding: 6px 10px; border: 0; border-radius: 4px; cursor: pointer;
+	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+}
 .row {
 	display: flex;
 	align-items: center;
@@ -364,12 +376,17 @@ const CONVERSATIONS_CSS = `
 .thread.collapsed > .children { display: none; }
 .crow { padding-left: 20px; color: var(--vscode-foreground); }
 .read-action, .code-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 	flex: 0 0 auto;
 	border: none;
 	background: transparent;
 	color: var(--vscode-textLink-foreground);
 	cursor: pointer;
 }
+.read-action svg, .code-action svg, .new-conversation svg { width: 14px; height: 14px; flex: 0 0 14px; }
+.glyph svg.thread-icon, .action svg.thread-icon { fill: none; }
 .read-action:focus-visible, .code-action:focus-visible, .crow:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
 }
@@ -389,14 +406,15 @@ const CONVERSATIONS_CSS = `
 /** Pane-specific script. The shared shell has already defined `vscode`, `reportRendered`, etc. */
 const CONVERSATIONS_JS = `
 const rows = document.getElementById('rows');
+const BUTTON_ICONS = ${JSON.stringify(THREAD_ICONS)};
 
 // Inline SVG glyphs (currentColor) — codicons aren't bundled, so no font is loaded.
 const COMMENT_SVG = '<svg viewBox="0 0 16 16"><path d="M2 2h12l1 1v8l-1 1H6l-3 3v-3H2l-1-1V3l1-1zm0 1v8h2v2l2-2h8V3H2z"/></svg>';
-const CHECK_SVG = '<svg viewBox="0 0 16 16"><path d="M13.5 3.5l-8 8L2 8l1-1 2.5 2.5L12.5 2.5z"/></svg>';
+const CHECK_SVG = BUTTON_ICONS.resolve;
 const HUBOT_SVG = '<svg viewBox="0 0 16 16"><path d="M5 2h1v2h4V2h1v2h1.5L14 5.5V13l-1 1H3l-1-1V5.5L3.5 4H5V2zM4 6.5V13h8V6.5L11.5 6h-7L4 6.5zM6 8.5a1 1 0 110 2 1 1 0 010-2zm4 0a1 1 0 110 2 1 1 0 010-2z"/></svg>';
 const ACCOUNT_SVG = '<svg viewBox="0 0 16 16"><path d="M8 2a3 3 0 100 6 3 3 0 000-6zm0 1a2 2 0 110 4 2 2 0 010-4zM3 14v-1c0-2 2.2-3 5-3s5 1 5 3v1h-1v-1c0-1.3-1.7-2-4-2s-4 .7-4 2v1H3z"/></svg>';
 const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
-const SLASH_SVG = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 1a7 7 0 100 14A7 7 0 008 1zM2 8a6 6 0 019.75-4.66L3.34 11.75A5.97 5.97 0 012 8zm2.25 4.66A6 6 0 0014 8a5.97 5.97 0 00-1.34-3.75l-8.41 8.41z"/></svg>';
+const SLASH_SVG = BUTTON_ICONS.reopen;
 
 let threads = null;                 // WireThread[] | null
 let hideResolved = true;            // host-authoritative toggle state (restored from state payload)
@@ -434,7 +452,7 @@ function renderComment(c, t) {
 		b.textContent = '#' + tag;
 		tagsEl.appendChild(b);
 	}
-	row.title = t.hasFile ? 'Open code' : 'Read full conversation';
+	row.title = t.hasFile ? 'Open code' : 'Read full thread';
 	row.tabIndex = 0;
 	row.setAttribute('role', 'button');
 	row.addEventListener('click', (e) => { e.stopPropagation(); openDefault(t); });
@@ -461,7 +479,7 @@ function renderThread(t) {
 		? '<span class="action" title="' + actionTitle + '">' + actionSvg + '</span>'
 		: '';
 	const driftHtml = t.drift === 'orphaned'
-		? '<span class="drift-badge" title="The saved code anchor cannot be found or read. The conversation is still available.">anchor unavailable</span>'
+		? '<span class="drift-badge" title="The saved code anchor cannot be found or read. The thread is still available.">anchor unavailable</span>'
 		: t.drift === 'relocated'
 			? '<span class="drift-badge" title="The saved code anchor is now on a different line.">code moved</span>'
 			: '';
@@ -471,10 +489,12 @@ function renderThread(t) {
 		'<span class="label"></span>' +
 		'<span class="desc"></span>' +
 		driftHtml +
-		'<button class="read-action" title="Read full conversation">Read</button>' +
-		(t.hasFile ? '<button class="code-action" title="Open code at the recorded location (if still available)">Code</button>' : '') +
+		'<button class="read-action" title="Read full thread">' + BUTTON_ICONS.read + '<span>Read</span></button>' +
+		(t.hasFile ? '<button class="code-action" title="Open code at the recorded location (if still available)">' + BUTTON_ICONS.code + '<span>Code</span></button>' : '') +
 		actionHtml;
-	row.querySelector('.label').textContent = 'Thread #' + t.num + '  ·  ' + t.loc;
+	row.querySelector('.label').textContent = t.hasFile
+		? 'Thread #' + t.num + '  ·  ' + t.loc
+		: 'Thread #' + t.num + '  ·  ' + (t.title || 'Review-wide');
 	row.querySelector('.desc').textContent = t.desc;
 	row.querySelector('.twisty').addEventListener('click', (e) => {
 		e.stopPropagation();
@@ -489,7 +509,7 @@ function renderThread(t) {
 			vscode.postMessage({ type: actionType, threadId: t.threadId });
 		});
 	}
-	row.title = t.hasFile ? 'Open code' : 'Read full conversation';
+	row.title = t.hasFile ? 'Open code' : 'Read full thread';
 	row.addEventListener('click', () => openDefault(t));
 	row.querySelector('.read-action').addEventListener('click', (e) => {
 		e.stopPropagation();
@@ -521,16 +541,25 @@ function showMessage(text) {
 	rows.appendChild(div);
 }
 
+function newConversationButton() {
+	const button = document.createElement('button');
+	button.className = 'new-conversation';
+	button.innerHTML = BUTTON_ICONS.new + '<span>New thread</span>';
+	button.addEventListener('click', () => vscode.postMessage({ type: 'newConversation' }));
+	rows.appendChild(button);
+}
+
 function paint() {
 	const t0 = performance.now();
 	rows.innerHTML = '';
 	if (threads === undefined) {
-		showMessage('Loading conversations…');
+		showMessage('Loading threads…');
 		reportRendered('conversations', 0, t0);
 		return;
 	}
 	if (!threads || threads.length === 0) {
-		showMessage('No conversations in this review.');
+		showMessage('No threads in this review.');
+		newConversationButton();
 		reportRendered('conversations', 0, t0);
 		return;
 	}
@@ -538,7 +567,8 @@ function paint() {
 	const visible = hideResolved ? threads.filter((t) => !t.resolved) : threads;
 	const resolvedHiddenCount = threads.length - visible.length;
 	if (visible.length === 0) {
-		showMessage(resolvedHiddenCount + ' resolved conversation(s) hidden — use the eye icon in the view title bar to show them.');
+		showMessage(resolvedHiddenCount + ' resolved thread(s) hidden — use the eye icon in the view title bar to show them.');
+		newConversationButton();
 		reportRendered('conversations', 0, t0);
 		return;
 	}

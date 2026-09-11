@@ -46,6 +46,12 @@ Conversation transcripts do not add a new on-disk review format. They read `comm
 never rewrite it just to display a discussion. `anchorText`, when present, is only the captured
 trimmed anchor line; it cannot reconstruct an entire deleted uncommitted file.
 
+Review-wide conversations use the same v2 thread/comment schema. They may have an additive
+`title` string, but omit `filePath`, `startLine`, `endLine` and `anchorText`. They participate in the
+same durable `seqCounter`, state and reply relationships as inline threads. Older files without
+`title` remain valid. Merely opening a draft does not create `comments.json`; posting its first
+message creates the review directory/file as needed.
+
 ## 3. `comments.json` — the v2 schema
 
 ```jsonc

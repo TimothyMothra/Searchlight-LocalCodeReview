@@ -149,6 +149,7 @@ const COMMAND_RE = /^searchlight\.[A-Za-z0-9]+$/;
 const ACTIONS = new Set([
 	'selectBase', 'selectCompare', 'pullBase', 'pullCompare', 'pinBaseline', 'autoBaseline',
 	'refreshBranches', 'viewConversation', 'toggleReviewed', 'openFile', 'openUncommitted', 'openCumulative',
+	'newConversation', 'postMessage', 'askCopilot', 'refreshConversation', 'quote', 'copyCode', 'copyMessage', 'previewDraft',
 	'expand', 'collapse', 'setExpanded', 'openBranchPicker', 'openCommitFile', 'copySha', 'navigate', 'resolve', 'unresolve',
 	'toggleFolder', 'toggleThread',
 ]);

@@ -44,7 +44,9 @@ necessarily immediately after activation; use that milestone to separate user de
 | Did refresh storms repeat work? | `refresh.request`, `refresh.dispatch`, `refs.refreshRequested`, cache events, comment coalescing/queue events |
 | Did host contention overlap the delay? | `host.sample`: event-loop lag, process CPU delta, RSS/heap, once per second for the first minute |
 
-Pane names are `comparison`, `files`, `commits`, and `conversations`. All four use the same protocol.
+Active pane names are `comparison`, `files`, and `conversations`; the embedded commit tree belongs
+to Comparison. The legacy `commits` usage bucket remains compatible with older records. All active
+panes use the same protocol.
 `<pane>.state` covers data retrieval and state construction; `.build` (where present) covers
 construction rather than data loading. `.serialize` counts actual UTF-8 bytes of the message,
 `.postMessage` measures host submission, and `.render` measures client-side DOM work.

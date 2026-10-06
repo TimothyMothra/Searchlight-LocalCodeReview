@@ -17,25 +17,24 @@ extension (v1 MVP). It covers two ways to run the demo:
 
 The extension renders **local self-review comment threads** — JSON stored on disk under
 `.vscode/searchlight-reviews/<src>_<tgt>/comments.json` — as **native inline VS Code comment
-threads** in the editor gutter, plus a **PR-review sidebar panel** (four stacked views:
-**Comparison**, **Changed Files**, **Commits**, **Conversations**). It supports reply, resolve/
+threads** in the editor gutter, plus a **PR-review sidebar panel** (three stacked views:
+**Comparison** with commits, **Changed Files**, **Conversations**). It supports reply, resolve/
 unresolve, `/tag` autocomplete, copy commands, and an **Ask Copilot to review** trigger that
 shells out to the `copilot` CLI (the extension never calls a model itself).
 
-### The four-view panel
+### The three-view panel
 
-The `searchlight` activity-bar container now hosts four native TreeViews driven by a single
-in-memory **active comparison** (`base` = target branch, `compare` = source branch under review):
+The `searchlight` activity-bar container hosts three webviews driven by a single
+in-memory **active comparison** (`base` = target branch or commit, `compare` = source branch under review):
 
 | View | Shows |
 |------|-------|
-| **Comparison**   | The current `Base` / `Compare` branches — click a row to pick, `⇄` to swap |
+| **Comparison**   | Inline Base/Compare selectors and a collapsed Commits section. Expand it to load History/Review rows; right-click a commit to Set as Base or expand a row to open file diffs. |
 | **Changed Files** | Hierarchical folder tree of `git diff base...compare`, with per-file reviewed checkboxes; click opens a native diff |
-| **Commits**       | `git log base..compare` — click copies the full SHA |
 | **Conversations** | Comment threads for the active review — click jumps to `file:line` |
 
-Defaults on activation: `base` = local `main` (else the remote default), `compare` = current HEAD
-branch. The on-disk `comments.json` is only created on the first mutation (a reviewed-file toggle
+Defaults on activation: `compare` = current HEAD; `base` = a conservative nearest-ancestor branch
+suggestion, else the repository default. The on-disk `comments.json` is only created on the first mutation (a reviewed-file toggle
 or a comment), so empty repos stay clean.
 
 ### The bundled fixture
@@ -69,18 +68,17 @@ code "$env:TEMP\searchlight-demo"
 
 The generated repo has a `main` base branch and a `feature/demo` compare branch with **2 commits**
 across **nested folders** (`src/api/`, `src/utils/`, `src/components/`, `tests/api/`) and a seeded
-**v2** review under `.vscode/searchlight-reviews/feature-demo_main/` — so all four panes populate:
+**v2** review under `.vscode/searchlight-reviews/feature-demo_main/` — so all three panes populate:
 
 | Pane | What shows in the demo |
 |------|------------------------|
-| **Comparison**    | `Base: main` / `Compare: feature/demo` |
+| **Comparison**    | `Base: main` / `Compare: feature/demo`, with the 2 feature commits in Review mode (plus ancestors in History mode) |
 | **Changed Files** | Folder tree: `src/api/{handlers,routes}.ts`, `src/utils/format.ts`, `src/components/Button.tsx`, `tests/api/handlers.test.ts` |
-| **Commits**       | The 2 `feature/demo` commits |
 | **Conversations** | 3 threads — the **`src/api/handlers.ts` `[bug]` thread** has a human comment + a threaded 🤖 Copilot agent reply |
 
 **To frame the screenshot:** in the demo window, open the Searchlight panel and compare
-`feature/demo → main`. Open **`src/api/handlers.ts`** so the inline **`[bug]` thread** (human
-comment + Copilot reply) is visible, with the four-view sidebar panel showing alongside. Then save
+`feature/demo → main`. Expand **Commits** inside Comparison to load its rows. Open **`src/api/handlers.ts`** so the inline **`[bug]` thread** (human
+comment + Copilot reply) is visible, with the three-view sidebar panel showing alongside. Then save
 the capture to **`docs/images/screenshot.png`** in *this* repo (the README references that path).
 
 All seeded content is synthetic — neutral author names (`reviewer`, agent `Copilot`) and generic

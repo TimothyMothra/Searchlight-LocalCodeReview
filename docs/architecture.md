@@ -1,7 +1,7 @@
 # Architecture
 
 Searchlight: Local Code Review is a single VS Code extension (TypeScript, compiled to
-`out/extension.js`). It presents a four-view "pull-request panel" over a **local** git branch
+`out/extension.js`). It presents a three-view "pull-request panel" over a **local** git branch
 comparison and persists review comments as JSON on disk. This document describes how the pieces fit
 together and why.
 
@@ -32,10 +32,10 @@ extension.ts ............ activation, view wiring, command registration, Ask-Cop
   │      └─ reviewStore.ts  load/serialize/mutate comments.json (+ durable seqCounter)
   │             └─ reviewModel.ts .. vscode-free schema types, parse, normalizeSeq, formatTimestamp
   │
-  ├─ comparisonView.ts .... WebviewView: inline base/compare selector + per-row Pull/Update
-  ├─ filesView.ts ......... TreeView: changed files (folder tree, reviewed-file checkboxes)
-  ├─ commitsView.ts ....... TreeView: commit list, click = per-commit multi-file diff
-  ├─ conversationsView.ts . TreeView: reviews -> threads -> comments, jump to file:line
+  ├─ comparisonView.ts .... WebviewView: selectors, effective baseline, commit data/actions
+  │      └─ commitsWebview.ts .. embedded compact commit-tree CSS + script
+  ├─ filesWebview.ts ...... WebviewView: changed files (folder tree, reviewed-file checkboxes)
+  ├─ conversationsWebview.ts .. WebviewView: threads -> comments, jump to file:line
   ├─ conversationDocument.ts . read-only virtual conversation tabs, independent of code files
   ├─ conversationModel.ts .... full transcript formatting and stable conversation references
   ├─ conversationPage.ts ..... formal discussion pages, composers and explicit Copilot actions
@@ -53,19 +53,18 @@ extension.ts ............ activation, view wiring, command registration, Ask-Cop
   └─ usageContext.ts ...... privacy-preserving editor-context classification
 ```
 
-## 3. The four views
+## 3. The three views
 
-The activity-bar container `searchlight` hosts four views, all reading from one `ActiveComparison`
+The activity-bar container `searchlight` hosts three views, all reading from one `ActiveComparison`
 supplied via a `() => active` getter:
 
 | Order | View | Default | Role |
 |-------|------|---------|------|
-| 1 | Comparison (`searchlight.comparison`) | Collapsed | Inline branch selectors and Pull/Update controls |
-| 2 | Commits (`searchlight.commits`) | Collapsed | Commit/file inspection and copy-SHA |
-| 3 | Changed Files (`searchlight.files`) | All folders initially expanded | Changed files and reviewed-file checkboxes; no all-changes toolbar button |
-| 4 | Threads (`searchlight.conversations`) | Resolved threads hidden | Inline-code navigation, Read thread, resolve/reopen controls |
+| 1 | Comparison (`searchlight.comparison`) | Collapsed; embedded Commits collapsed too | Selectors, baseline/Pin/Auto, History/Review commit tree and native Set as Base |
+| 2 | Changed Files (`searchlight.files`) | All folders initially expanded | Changed files and reviewed-file checkboxes; no all-changes toolbar button |
+| 3 | Threads (`searchlight.conversations`) | Resolved threads hidden | Inline-code navigation, Read thread, resolve/reopen controls |
 
-All four are WebviewViews. The Comparison view originally
+All three are WebviewViews. The Comparison view originally
 used a two-row TreeView whose rows fired `showQuickPick()`. The resulting top-center popup was
 routinely mistaken for the Command Palette / search bar. Replacing it with a `WebviewViewProvider`
 that renders two `<input>` + filterable-dropdown fields *in place* removed the popup entirely.
@@ -81,10 +80,10 @@ action even though its Changed Files toolbar button was removed.
 `ActiveComparison` (activeComparison.ts) holds `base`/`compare` branch names, their resolved commit
 shas, a separate effective `baselineCommit`, the current HEAD, the resolved `reviewDir` +
 `sourceFile` path, and the in-memory `Review`.
-All four views and the CommentController read from it, so a single `refreshAll()` keeps everything
+All three views and the CommentController read from it, so a single `refreshAll()` keeps everything
 consistent.
 
-- `base` = TARGET branch → maps to `review.targetBranch`.
+- `base` = TARGET branch or full pinned commit SHA → maps to `review.targetBranch`.
 - `compare` = SOURCE branch under review → maps to `review.sourceBranch`.
 - `changedFiles` / `logRange` results are memoized keyed by the effective baseline/compare commit pair, so re-renders
   don't re-shell git.
@@ -98,7 +97,7 @@ consistent.
 
 ### Target branch vs. effective baseline
 
-The **Target branch** identifies the intended destination and continues to identify the review.
+The **Base target** identifies the intended branch or fixed commit and continues to identify the review.
 The **Effective baseline** is the exact commit used on the left of branch-review diffs:
 
 - **Auto:** for a local target, consider that ref and its configured upstream. When no upstream is
@@ -110,10 +109,13 @@ The **Effective baseline** is the exact commit used on the left of branch-review
   target/source pair in VS Code workspace state. **Auto** clears the pin. Pins survive reloads
   and target updates, but a rebase that makes the pin cease to be an ancestor blocks comparison
   until the user clears or replaces it.
+- **Set as Base:** right-click a commit to use its full SHA as a fixed target. The same ancestor
+  validation applies; its baseline is exact, never substituted with another shared ancestor.
+  A fixed-target review uses a SHA-named folder, separate from a branch-target review.
 - Missing refs, no shared ancestry, multiple merge-bases, and incomparable candidate baselines
   are visible errors, not empty successful comparisons or fallbacks to the target tip.
 
-The pane shows the baseline SHA, auto/pinned mode, and the selection reason. Target selections are
+The pane shows the baseline SHA and auto/pinned mode, with the full reason in its tooltip. Target selections are
 remembered per source branch in workspace state; review folder names and `comments.json` target
 identity do not change when Auto chooses an upstream's shared ancestor.
 
@@ -131,6 +133,30 @@ Resolution refreshes on Git API state events, manual Refresh, and filesystem eve
 worktree HEAD and shared loose/packed refs. This includes ref changes made from another worktree.
 Overtaken resolutions/results are discarded so an older query cannot replace a newer selection.
 
+### Suggested targets and the embedded commit tree
+
+With no remembered/explicit target, defaults scan up to 200 first-parent source commits for the
+nearest unambiguous ancestor branch tip. Source/tracking aliases are excluded; a single local tip
+is preferred over remote aliases. Ambiguous/missing tips fall back to the repository default.
+This is a suggestion, not proof of a branch's original parent. Saved targets are restored on
+startup/automatic HEAD changes; explicit current choices remain stable across manual source changes.
+
+Commits starts collapsed. No list requests or row rendering occur until expansion. Loaded pages,
+including empty results and requests finishing while closed, are cached for reopening. Source/mode
+changes invalidate the cache; Review baseline changes do too. Replacement queries stay deferred
+while closed. The target-discovery scan is separate and still needed when defaults are requested.
+
+History pages 50 first-parent ancestors at a time, including commits before the baseline. Review
+uses the effective baseline/source range, including merged side commits and its 200-commit cap.
+Rows retain file expansion and per-file diffs; native right-click actions provide Set as Base,
+Copy Commit SHA and Open Commit Diff. The full row SHA is passed through `data-vscode-context`,
+scoped to commit rows, not files. Source/Base role badges precede the SHA/subject so ellipsis cannot
+hide them. BASE marks the effective baseline, not a potentially stale target branch tip.
+
+History remains usable to repair a baseline error; Review cannot load stale/invalid baseline data.
+Pending responses are tied to the source and (for Review) effective baseline, so pin/ref changes
+cannot replace a newer selection. Collapse-all now belongs to Comparison's title bar.
+
 ## 5. Activation flow (fast-return pattern)
 
 `activate()` (extension.ts) deliberately does **no awaited git work**:
@@ -139,7 +165,7 @@ Overtaken resolutions/results are discarded so an older query cannot replace a n
 2. Construct `ActiveComparison(wsFolder, wsFolder)` with a **placeholder** repo root.
 3. Construct `SearchlightCommentController` with a `() => active` getter (so a first-ever thread can
    target the active comparison before any `comments.json` exists).
-4. Register the four providers, all reading `() => active`.
+4. Register the three providers, all reading `() => active`.
 5. Register `ReviewDiffContentProvider` on the diff scheme, `registerTagCompletion()`, the file
    watcher, and ~40 commands.
 6. Leave heavy comparison initialization **deferred** until a pane, comparison command, or new
@@ -155,7 +181,7 @@ This ordering exists because on Windows, git spawns during the startup burst are
 Defender; awaiting them in `activate()` measured tens of seconds of dead time. Returning first and
 doing git work in the background keeps the panel responsive.
 
-`refreshAll()` refreshes all four providers, re-renders the CommentController from disk, and updates
+`refreshAll()` refreshes all three providers, re-renders the CommentController from disk, and updates
 the status bar.
 
 Review discovery walks only each workspace's `.vscode/searchlight-reviews` subtree, not the
@@ -246,7 +272,7 @@ reply. **No LM API, no keys, no in-extension model call.**
   ActiveComparison.resolve()          reviewStore.saveReview()  ──writes──► comments.json
         │  (memoized git)                     │                                   │
         ▼                                     ▼                                   │ file watcher
-   refreshAll() ──────────────► 4 providers + CommentController.render() ◄────────┘
+   refreshAll() ──────────────► 3 providers + CommentController.render() ◄────────┘
                                                      ▲
                                      Ask Copilot ────┘ (external CLI edits comments.json)
 ```
@@ -260,7 +286,7 @@ reply. **No LM API, no keys, no in-extension model call.**
 | `vscode`-free `reviewModel.ts` | Unit-test the schema + `normalizeSeq` migration without the extension host |
 | Fast-return activation + background git | Defender-scanned git spawns made awaited activation take tens of seconds |
 | Durable `seqCounter` for thread `#NN` ids | A transiently-empty in-memory review must not reset/reuse a display id; monotonic counter fixes it |
-| Comparison as webview, others as TreeView | Kill the QuickPick-mistaken-for-search-bar popup; keep native tree ergonomics elsewhere |
+| Combined selectors + compact commit tree | Avoid the prose ancestry wall and duplicate Commits pane; choose bases through native commit context menus |
 | No-shell git helpers (`listWorktreesCli`) | Avoid flashing shell windows and reduce spawn cost on the hot path |
 | Lazy, diff-friendly writes | Don't create files until there's content; 2-space indent + trailing newline keeps git diffs clean |
 

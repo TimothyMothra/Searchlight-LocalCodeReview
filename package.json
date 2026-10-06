@@ -45,15 +45,7 @@
           "type": "webview",
           "visibility": "collapsed",
           "icon": "media/searchlight.svg",
-          "initialSize": 230
-        },
-        {
-          "id": "searchlight.commits",
-          "name": "Commits",
-          "type": "webview",
-          "visibility": "collapsed",
-          "icon": "media/searchlight.svg",
-          "initialSize": 200
+          "initialSize": 450
         },
         {
           "id": "searchlight.files",
@@ -75,10 +67,6 @@
       {
         "view": "searchlight.files",
         "contents": "No changed files between base and compare."
-      },
-      {
-        "view": "searchlight.commits",
-        "contents": "No commits between base and compare."
       },
       {
         "view": "searchlight.conversations",
@@ -254,6 +242,12 @@
         "title": "Searchlight: Open Commit Diff"
       },
       {
+        "command": "searchlight.setCommitAsBase",
+        "title": "Set as Base",
+        "category": "Searchlight",
+        "icon": "$(git-compare)"
+      },
+      {
         "command": "searchlight.commitsViewAllChanges",
         "title": "Searchlight: View All Changes vs Base",
         "icon": "$(diff-multiple)"
@@ -367,6 +361,11 @@
           "group": "navigation@-1"
         },
         {
+          "command": "searchlight.collapseAllCommits",
+          "when": "view == searchlight.comparison",
+          "group": "navigation@0"
+        },
+        {
           "command": "searchlight.copyCompareBranch",
           "when": "view == searchlight.comparison",
           "group": "navigation@1"
@@ -407,16 +406,6 @@
           "group": "navigation@3"
         },
         {
-          "command": "searchlight.refreshAll",
-          "when": "view == searchlight.commits",
-          "group": "navigation@3"
-        },
-        {
-          "command": "searchlight.collapseAllCommits",
-          "when": "view == searchlight.commits",
-          "group": "navigation@2"
-        },
-        {
           "command": "searchlight.conversationsHideResolved",
           "when": "view == searchlight.conversations && !searchlight.conversationsResolvedHidden",
           "group": "navigation@0"
@@ -432,17 +421,24 @@
           "group": "navigation@1"
         }
       ],
-      "view/item/context": [
+      "webview/context": [
         {
-          "command": "searchlight.copyCommitSha",
-          "when": "view == searchlight.commits && viewItem == searchlight.commit",
-          "group": "inline@1"
-        },
-        {
-          "command": "searchlight.copyCommitSha",
-          "when": "view == searchlight.commits && viewItem == searchlight.commit",
+          "command": "searchlight.setCommitAsBase",
+          "when": "webviewId == searchlight.comparison && webviewSection == commit",
           "group": "searchlight@1"
         },
+        {
+          "command": "searchlight.copyCommitSha",
+          "when": "webviewId == searchlight.comparison && webviewSection == commit",
+          "group": "searchlight@2"
+        },
+        {
+          "command": "searchlight.openCommitDiff",
+          "when": "webviewId == searchlight.comparison && webviewSection == commit",
+          "group": "searchlight@3"
+        }
+      ],
+      "view/item/context": [
         {
           "command": "searchlight.resolveThreadNode",
           "when": "view == searchlight.conversations && viewItem == searchlight.thread.unresolved",
@@ -471,6 +467,10 @@
       "commandPalette": [
         {
           "command": "searchlight.viewConversation",
+          "when": "false"
+        },
+        {
+          "command": "searchlight.setCommitAsBase",
           "when": "false"
         },
         {
@@ -523,7 +523,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "test": "npm run compile && node --test scripts/comparison.test.cjs scripts/diagnostics.test.cjs scripts/usage.test.cjs scripts/usage-integration.test.cjs scripts/conversation.test.cjs scripts/review-discovery.test.cjs scripts/pane-defaults.test.cjs scripts/conversation-page.test.cjs",
+    "test": "npm run compile && node --test",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {

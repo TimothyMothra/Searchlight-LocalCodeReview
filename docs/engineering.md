@@ -21,6 +21,7 @@ all of `node_modules` from the VSIX.
 | `src/` | TypeScript sources (see the module graph in `architecture.md`) |
 | `out/` | Compiled `*.js` (gitignored build output; what VS Code actually runs) |
 | `scripts/deploy-local.ps1` | Package + sideload into the host VS Code |
+| `scripts/comparison.test.cjs` | Git ancestry, automatic-target, comparison-state, and webview regression tests |
 | `docs/` | This knowledge base |
 | `package.json` | Manifest: commands, views, menus, configuration, activation |
 | `tsconfig.json` | TS config (target/module, `out/` outDir) |
@@ -51,6 +52,22 @@ code --list-extensions --show-versions | Select-String searchlight
 # -> local.searchlight@0.0.1
 ```
 
+### Comparison regression tests
+
+Run `npm test` to compile and execute the built-in Node test runner. The baseline regression suite
+is `scripts/comparison.test.cjs`; the real-Git/embedded-tree suite is `scripts/comparison-ui.test.cjs`.
+The tests construct disposable Git object databases and run read-only Git queries against them:
+stacked branches, tracking aliases, ambiguous tips, moved targets, merges, detached sources, bounded
+discovery, and pagination to the root. VS Code boundaries are stubbed to exercise explicit base
+pinning, source-following, lazy review paths, provider messages, and the shipped webview script.
+Tests also cover compact row rendering, History/Review mode transitions, native context-menu
+payload/scoping, file expansion, keyboard focus, and collapse-all. Lazy-loading assertions require
+zero commit-page requests and zero rendered rows before first expansion, cached reopening without
+duplicate requests (including empty/in-flight results), and deferred invalidation while collapsed.
+Native VS Code menu presentation
+still requires an extension-host or manual UI check; a DOM test alone does not exercise the host.
+No test stages, commits, or changes branches in the developer's repository.
+
 ## 4. Manifest highlights (`package.json`)
 
 - `publisher`: `TimothyMothra`; `repository.url`:
@@ -58,8 +75,8 @@ code --list-extensions --show-versions | Select-String searchlight
 - `activationEvents`: `onStartupFinished` plus
   `workspaceContains:.vscode/searchlight-reviews/**/comments.json`.
 - `capabilities.untrustedWorkspaces.supported`: `true` (works in Restricted Mode).
-- **~40 commands** and four views under the `searchlight` container.
-- Comparison title-bar order: `copyCompareBranch@1` · `copyComparePath@2` · `openTerminal@3` ·
+- **~40 commands** and three views under the `searchlight` container; commit rows are inside Comparison.
+- Comparison title-bar order: `collapseAllCommits@0` · `copyCompareBranch@1` · `copyComparePath@2` · `openTerminal@3` ·
   `refreshAll@4`.
 
 ### Configuration keys
@@ -77,8 +94,8 @@ code --list-extensions --show-versions | Select-String searchlight
 
 ## 5. Performance notes
 
-- **Fast-return activation.** `activate()` does no awaited git work; the real repo root + default
-  resolution + `refreshAll()` run in a background IIFE. See `architecture.md` §5. Root cause: on
+- **Fast-return activation.** `activate()` does no awaited git work; shared comparison initialization
+  is requested by panes, comparison commands or new discussions. See `architecture.md` §5. Root cause: on
   Windows, Defender scans `git.exe` on every spawn during the startup burst (measured tens of
   seconds), so git must not be awaited in `activate()`.
 - **No-shell git helpers ("KB-001").** `git.ts` uses `child_process` with an argv array (no shell),

@@ -3,7 +3,8 @@
  *
  * These intentionally shell out to `git` (rather than depending on the built-in vscode.git
  * extension API) so they work headlessly and in the Extension Development Host without waiting
- * for the git extension to activate. Each helper degrades gracefully to a sensible default.
+ * for the git extension to activate. Legacy helpers degrade gracefully; ancestry helpers throw so
+ * callers can distinguish a failed read from an empty history.
  */
 
 import { exec, execFile } from 'child_process';
@@ -23,6 +24,7 @@ const diagnosticOptions = new Set([
 	'--count', '--ff-only', '--no-commit-id', '--name-only', '-r', '--cached',
 	'--others', '--exclude-standard', '--is-ancestor', '--all',
 	'--include-root-refs',
+	'--first-parent', '--root', '--diff-merges',
 ]);
 
 function commandFields(args: string[], execution: 'shell' | 'execFile'): Record<string, string> {
@@ -82,6 +84,8 @@ export interface BranchRef {
 	kind: 'local' | 'remote';
 	/** Commit sha the ref points at, when known. */
 	commit?: string;
+	/** Configured tracking upstream (not necessarily the review target). */
+	upstream?: string;
 }
 
 /** A worktree entry parsed from `git worktree list --porcelain`. */
@@ -388,6 +392,115 @@ export async function resolveCommit(cwd: string, ref: string): Promise<string | 
 	return gitv(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], cwd);
 }
 
+const branchRefArgs = [
+	'for-each-ref', '--format=%(refname)\t%(objectname)\t%(upstream)\t%(symref)',
+	'refs/heads', 'refs/remotes',
+];
+
+function parseBranchRefs(out: string): BranchRef[] {
+	return out.split(/\r?\n/).flatMap((line): BranchRef[] => {
+		const [ref, commit, upstream, symbolic] = line.split('\t');
+		if (!ref || symbolic) { return []; }
+		const kind = ref.startsWith('refs/heads/') ? 'local' : 'remote';
+		const name = ref.replace(/^refs\/(heads|remotes)\//, '');
+		return [{
+			name, kind, commit: commit || undefined,
+			upstream: upstream ? upstream.replace(/^refs\/(heads|remotes)\//, '') : undefined,
+		}];
+	});
+}
+
+export interface AncestryCommit extends CommitEntry {
+	/** All parents; browsing follows only the first parent through merges. */
+	parents: string[];
+}
+
+export interface AncestryPage {
+	commits: AncestryCommit[];
+	/** Inclusive start SHA for the next page, pinned independently of moving refs. */
+	next?: string;
+}
+
+/** Read a bounded first-parent history page. Failures are surfaced by the caller, not empty history. */
+export async function commitAncestry(cwd: string, startSha: string, cap = 50): Promise<AncestryPage> {
+	if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(startSha)) {
+		throw new Error('Ancestry requires a resolved commit SHA.');
+	}
+	if (!Number.isInteger(cap) || cap < 1) {
+		throw new Error('Ancestry page size must be a positive integer.');
+	}
+	const stdout = await runGitQuery(cwd, [
+		'log', '--first-parent', `--max-count=${cap + 1}`,
+		'--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%cr%x1f%P', startSha, '--',
+	]);
+	const entries = stdout.trim().split(/\r?\n/).filter(Boolean).map((line): AncestryCommit => {
+		const [sha, shortSha, subject, author, relDate, parents] = line.split('\x1f');
+		return { sha, shortSha, subject, author, relDate, parents: parents ? parents.split(' ') : [] };
+	});
+	return { commits: entries.slice(0, cap), next: entries[cap]?.sha };
+}
+
+export interface BaseSuggestion {
+	branch?: string;
+	explanation: string;
+}
+
+/**
+ * Suggest a stacked-branch target only when the nearest first-parent branch tip is unambiguous.
+ * ASSUMPTION: a nearby ancestor tip is useful evidence, not proof of the intended PR target.
+ * Bound discovery to 200 commits; moved/deleted targets and ambiguous aliases require manual choice.
+ */
+export async function suggestBaseBranch(cwd: string, compare: string): Promise<BaseSuggestion> {
+	const sha = await resolveCommit(cwd, compare);
+	if (!sha) {
+		throw new Error(`Cannot resolve source ${compare}.`);
+	}
+	const [page, refsResult, fallback] = await Promise.all([
+		commitAncestry(cwd, sha, 200),
+		runGitQuery(cwd, branchRefArgs, 16 * 1024 * 1024),
+		defaultBaseBranch(cwd),
+	]);
+	const refs = parseBranchRefs(refsResult);
+	const sourceLocals = refs.filter((ref) =>
+		ref.kind === 'local' && (ref.name === compare || ref.commit === sha),
+	);
+	const sourceNames = new Set([compare, ...sourceLocals.map((ref) => ref.name)]);
+	const sourceRemote = refs.find((ref) => ref.kind === 'remote' && ref.name === compare);
+	if (sourceRemote) {
+		sourceNames.add(compare.slice(compare.indexOf('/') + 1));
+	}
+	const upstreams = new Set(sourceLocals.map((ref) => ref.upstream).filter(Boolean));
+	// A tracking copy of the source can lag behind HEAD. It must never become the target.
+	// Local tips at a detached source SHA also supply tracking aliases to exclude.
+	const candidates = refs.filter((ref) =>
+		!sourceNames.has(ref.name) && !upstreams.has(ref.name) && ref.commit !== sha &&
+		!(ref.kind === 'remote' && sourceNames.has(ref.name.slice(ref.name.indexOf('/') + 1))),
+	);
+	for (const commit of page.commits.slice(1)) {
+		const atCommit = candidates.filter((ref) => ref.commit === commit.sha);
+		if (atCommit.length === 0) {
+			continue;
+		}
+		// Local + remote copies of one tip are aliases; prefer a single local branch.
+		const locals = atCommit.filter((ref) => ref.kind === 'local');
+		const choices = locals.length > 0 ? locals : atCommit;
+		if (choices.length === 1) {
+			return {
+				branch: choices[0].name,
+				explanation: `Suggested target: nearest first-parent branch tip (${commit.shortSha}).`,
+			};
+		}
+		return {
+			branch: fallback,
+			explanation: 'Default target: multiple branches label the nearest ancestor. Right-click a History commit to Set as Base.',
+		};
+	}
+	return {
+		branch: fallback,
+		explanation: 'Default target: no unambiguous branch tip in the first 200 first-parent commits. Right-click a History commit to Set as Base.',
+	};
+}
+
 /**
  * Pick a sensible default TARGET (base) branch:
  * prefer a local `main`, else the remote default (origin/HEAD target), else the first branch.
@@ -489,13 +602,16 @@ export async function fastForwardRef(cwd: string, upstream: string, branch: stri
  * List the files changed by a single commit `sha` (its diff against its first parent).
  * Uses `git diff-tree`, which correctly handles root commits (no parent) by listing all files,
  * unlike `sha^..sha` which errors on a parentless commit.
+ * Throws on failure so the commit tree can show an error instead of an empty expansion.
  */
 export async function changedFilesForCommit(cwd: string, sha: string): Promise<string[]> {
-	const out = await gitv(['diff-tree', '--no-commit-id', '--name-only', '-r', sha], cwd);
-	if (!out) {
-		return [];
+	if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)) {
+		throw new Error('Commit file expansion requires a resolved commit SHA.');
 	}
-	return out
+	const stdout = await runGitQuery(cwd,
+		['diff-tree', '--root', '--diff-merges=first-parent', '--no-commit-id', '--name-only', '-r', sha, '--'],
+	);
+	return stdout
 		.split(/\r?\n/)
 		.map((l) => l.trim())
 		.filter((l) => l.length > 0);

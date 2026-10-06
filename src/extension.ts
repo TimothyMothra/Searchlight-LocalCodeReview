@@ -30,7 +30,6 @@ import {
 import { ActiveComparison } from './activeComparison';
 import { ComparisonWebviewProvider } from './comparisonView';
 import { FilesWebviewProvider, isUncommittedHidden, syncUncommittedContext } from './filesWebview';
-import { CommitsWebviewProvider } from './commitsWebview';
 import { ConversationsWebviewProvider, isResolvedHidden, syncResolvedContext } from './conversationsWebview';
 import {
 	DIFF_SCHEME,
@@ -228,7 +227,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return;
 	}
 
-	// The single in-memory "active comparison" that feeds all four views.
+	// The single in-memory "active comparison" that feeds all review views.
 	//
 	// NOTE: activate() must return FAST. On Windows, antivirus (Defender) scans git.exe on each
 	// spawn during the startup burst, so getRepoRoot / computeDefaults / resolve can each take
@@ -244,8 +243,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const comments = new SearchlightCommentController(() => active, () => ensureComparison('new-discussion'));
 	context.subscriptions.push(comments);
 
-	// Four stacked views, all reading from `active`. The comparison view is a webview inline selector;
-	// the other three are TreeViews.
+	// Three stacked webviews; Comparison owns the selectors and compact commit tree.
 	const comparisonProvider = new ComparisonWebviewProvider(
 		() => active,
 		async (branch) => {
@@ -286,7 +284,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		},
 	);
-	const commitsProvider = new CommitsWebviewProvider(() => active);
 	const conversationsProvider = new ConversationsWebviewProvider(() => active, context.workspaceState);
 	const filesProvider = new FilesWebviewProvider(
 		() => active,
@@ -296,16 +293,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 
 	context.subscriptions.push(
-		registerPane('searchlight.comparison', comparisonProvider),
+		registerPane('searchlight.comparison', comparisonProvider, true),
 	);
 	context.subscriptions.push(
 		registerPane('searchlight.files', filesProvider, true),
-	);
-	// The Commits pane is now a webview (Phase D). Its expand/collapse, lazy
-	// file listing, copy-sha button, and truncation node are handled inside
-	// CommitsWebviewProvider's message handling — no TreeView subscription.
-	context.subscriptions.push(
-		registerPane('searchlight.commits', commitsProvider, true),
 	);
 	// The Conversations pane is now a webview (Phase E). Its thread rows,
 	// per-comment #tag badges, resolve/unresolve inline buttons, and
@@ -333,7 +324,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 	);
 
-	// Refresh all four views + inline comments + status bar together.
+	// Refresh all views + inline comments + status bar together.
 	const refreshAll = (reason = 'command-or-review-action') => {
 		// Dispatch stays fire-and-forget; child spans retain this refresh's correlation context.
 		void trace('refresh.dispatch', async () => {
@@ -342,7 +333,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (reason === 'manual-refresh' || reason === 'manual-resolve-refresh') { conversationPages.refresh(); }
 			comparisonProvider.refresh(['manual-refresh', 'manual-resolve-refresh', 'git-operation'].includes(reason));
 			filesProvider.refresh();
-			commitsProvider.refresh();
 			conversationsProvider.refresh();
 			void comments.render();
 			void statusBar.update();
@@ -609,9 +599,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await conversationsProvider.setHideResolved(false);
 		}),
 		registerCommand('searchlight.collapseAllCommits', () => {
-			// The Commits pane is a webview (Phase D); collapsing is pure UI state
-			// posted to the webview, which collapses all expanded commit rows.
-			commitsProvider.setExpanded(false);
+			comparisonProvider.setCommitsExpanded(false);
+		}),
+		registerCommand('searchlight.setCommitAsBase', async (commit: unknown) => {
+			try {
+				await comparisonProvider.setCommitAsBase(commit);
+			} catch (error) {
+				const message = errMessage(error);
+				log(`Set as Base failed: ${message}`);
+				void vscode.window.showErrorMessage(`Searchlight: ${message}`);
+			}
 		}),
 		registerCommand(
 			'searchlight.updateStaleBranch',
@@ -631,8 +628,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		registerCommand('searchlight.openCumulativeFileDiff', async (relPath: string) => {
 			await openCumulativeFileDiff(active, relPath);
 		}),
-		registerCommand('searchlight.openCommitDiff', async (sha: string) => {
-			await openCommitDiff(active, sha);
+		registerCommand('searchlight.openCommitDiff', async (commit: string | { sha?: string }) => {
+			const sha = typeof commit === 'string' ? commit : commit?.sha;
+			if (sha) { await openCommitDiff(active, sha); }
 		}),
 		registerCommand(
 			'searchlight.openCommitFileDiff',
@@ -694,7 +692,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		perf('getRepoRoot', tRepo);
 		active.repoRootFsPath = repoRoot;
 
-		// Populate the four views: compute default base/compare (unless disabled), resolve, refresh.
+		// Populate the review views: compute default base/compare (unless disabled), resolve, refresh.
 		const autoCreateOnEmpty = vscode.workspace
 			.getConfiguration('searchlight')
 			.get<boolean>('autoCreateOnEmpty', true);

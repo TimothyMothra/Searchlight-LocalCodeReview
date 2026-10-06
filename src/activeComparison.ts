@@ -1,7 +1,7 @@
 /**
- * The in-memory "active comparison" — the single source of truth all four Searchlight views read.
+ * The in-memory "active comparison" — the single source of truth all Searchlight views read.
  *
- * A comparison is defined by a `base` (TARGET branch) and a `compare` (SOURCE branch = the changes
+ * A comparison is defined by a `base` (TARGET branch or pinned commit) and a `compare` (SOURCE branch = the changes
  * under review). It maps onto the on-disk review schema as `sourceBranch = compare`,
  * `targetBranch = base`. The review file is created lazily: only a mutation (a reviewed-file
  * checkbox toggle, or a comment add/reply) persists `comments.json` to disk.
@@ -9,7 +9,7 @@
 
 import * as vscode from 'vscode';
 import { getHead } from './gitApi';
-import { changedFiles, changedFilesCumulative, ChangedFile, CommitEntry, defaultBaseBranch, logRange, resolveCommit } from './git';
+import { BaseSuggestion, changedFiles, changedFilesCumulative, ChangedFile, CommitEntry, defaultBaseBranch, logRange, resolveCommit, suggestBaseBranch } from './git';
 import { Baseline, resolveBaseline, resolveBaselinePin } from './baseline';
 import { computeReviewPaths, emptyReview, loadReview } from './reviewStore';
 import { Review } from './reviewModel';
@@ -18,8 +18,10 @@ import { event, now, trace } from './diagnostics';
 
 /** Holds and resolves the active base/compare comparison + its review. */
 export class ActiveComparison {
-	/** TARGET branch (maps to review.targetBranch). Undefined until selected/defaulted. */
+	/** TARGET branch or pinned commit (maps to review.targetBranch). Undefined until selected/defaulted. */
 	base?: string;
+	/** Visible explanation of an inferred/default target; explicit selections clear it. */
+	baseExplanation?: string;
 	/** SOURCE branch under review (maps to review.sourceBranch). */
 	compare?: string;
 	/** Full sha `base` resolves to. */
@@ -35,6 +37,9 @@ export class ActiveComparison {
 	baselineReason = '';
 	baselineError?: string;
 	private resolveVersion = 0;
+
+	/** Compatibility name for the effective baseline used by the embedded history markers. */
+	get mergeBaseCommit(): string | undefined { return this.baselineCommit; }
 
 	/** Current HEAD branch of the repo (undefined when detached). */
 	headBranch?: string;
@@ -54,6 +59,8 @@ export class ActiveComparison {
 	 * choice is preserved until the next explicit change.
 	 */
 	private compareExplicit = false;
+	private baseExplicit = false;
+	private defaultBaseCompare?: string;
 
 	/** Memoized changedFiles/logRange results, keyed by the resolved commit pair. */
 	private changedFilesKey?: string;
@@ -105,19 +112,15 @@ export class ActiveComparison {
 
 	/**
 	 * Populate base/compare with sensible defaults when nothing is selected:
-	 * base = default branch (prefer local `main`), compare = current HEAD branch (or short commit
-	 * when detached). Silent — never shows a popup.
+	 * Compare follows HEAD; base uses conservative ancestor-tip evidence, then the repository default.
+	 * Suggestions are explained inline, never in a popup.
 	 */
 	async computeDefaults(): Promise<void> {
 		return trace('comparison.defaults', () => this.computeDefaultsCore());
 	}
 
 	private async computeDefaultsCore(): Promise<void> {
-		// getHead and defaultBaseBranch are independent — resolve them together.
-		const [head, defBase] = await Promise.all([
-			getHead(this.repoRootFsPath),
-			defaultBaseBranch(this.repoRootFsPath),
-		]);
+		const head = await getHead(this.repoRootFsPath);
 		this.headBranch = head.detached ? undefined : head.branch;
 		this.headCommit = head.commit;
 
@@ -125,11 +128,37 @@ export class ActiveComparison {
 			if (!head.detached && head.branch) {
 				this.compare = head.branch;
 			} else if (head.commit) {
-				this.compare = head.commit.slice(0, 7);
+				this.compare = head.commit;
 			}
 		}
-		if (this.base === undefined) {
-			this.base = (this.compare ? this.workspaceState.get<string>(this.targetKey(this.compare)) : undefined) ?? defBase;
+		const compare = this.compare;
+		if (this.base === undefined && compare) {
+			const saved = this.workspaceState.get<string>(this.targetKey(compare));
+			if (saved && !this.baseExplicit) {
+				this.base = saved;
+				this.baseExplicit = true;
+				this.defaultBaseCompare = compare;
+			} else {
+				const suggestion = await this.automaticBase(compare);
+				// ASSUMPTION: explicit choices win over discovery that finishes afterward.
+				if (!this.baseExplicit && this.base === undefined && this.compare === compare) {
+					this.base = suggestion.branch;
+					this.baseExplanation = suggestion.explanation;
+					this.defaultBaseCompare = compare;
+				}
+			}
+		}
+	}
+
+	private async automaticBase(compare: string): Promise<BaseSuggestion> {
+		try {
+			return await trace('comparison.targetDiscovery', () => suggestBaseBranch(this.repoRootFsPath, compare));
+		} catch (error) {
+			console.error('[searchlight] Target discovery failed:', error);
+			return {
+				branch: await defaultBaseBranch(this.repoRootFsPath),
+				explanation: `Target discovery failed: ${error instanceof Error ? error.message : String(error)} Using the repository default.`,
+			};
 		}
 	}
 
@@ -152,6 +181,9 @@ export class ActiveComparison {
 		const headBranch = head.detached ? undefined : head.branch;
 		let base = this.base;
 		let compare = this.compare;
+		let baseExplicit = this.baseExplicit;
+		let baseExplanation = this.baseExplanation;
+		let defaultBaseCompare = this.defaultBaseCompare;
 
 		// Auto-follow the checked-out branch: when the user has NOT explicitly picked a compare
 		// branch, `compare` tracks HEAD so a `git checkout` is reflected instead of leaving a stale
@@ -159,12 +191,27 @@ export class ActiveComparison {
 		// Skipped while detached so a transient detach doesn't clobber a branch name with a short sha.
 		if (!this.compareExplicit && !head.detached && headBranch && compare !== headBranch) {
 			compare = headBranch;
-			base = this.workspaceState.get<string>(this.targetKey(compare)) ?? await defaultBaseBranch(this.repoRootFsPath);
+			const saved = base !== undefined ? this.workspaceState.get<string>(this.targetKey(compare)) : undefined;
+			if (saved) {
+				base = saved;
+				baseExplicit = true;
+				baseExplanation = undefined;
+			}
+		}
+		// Re-suggest only when the source changes, not on every commit or working-tree edit.
+		// An unset base stays unset when autoCreateOnEmpty is disabled.
+		if (!baseExplicit && base !== undefined && compare && defaultBaseCompare !== undefined && compare !== defaultBaseCompare) {
+			const suggestion = await this.automaticBase(compare);
+			base = suggestion.branch;
+			baseExplanation = suggestion.explanation;
+			defaultBaseCompare = compare;
 		}
 
 		if (version !== this.resolveVersion) { return; }
 		if (!base || !compare) {
 			event('comparison.outcome', { state: 'unselected' });
+			this.base = base;
+			this.compare = compare;
 			this.headBranch = headBranch;
 			this.headCommit = head.commit;
 			this.baseCommit = undefined;
@@ -198,6 +245,9 @@ export class ActiveComparison {
 		if (version !== this.resolveVersion) { return; }
 		this.base = base;
 		this.compare = compare;
+		this.baseExplicit = baseExplicit;
+		this.baseExplanation = baseExplanation;
+		this.defaultBaseCompare = defaultBaseCompare;
 		this.headBranch = headBranch;
 		this.headCommit = head.commit;
 		this.baseCommit = baseline?.targetCommit;
@@ -252,12 +302,21 @@ export class ActiveComparison {
 		}
 	}
 
-	/** Set the base (target) branch and re-resolve. */
+	/** Pin a base branch or immutable commit and re-resolve. */
 	async setBase(base: string): Promise<void> {
+		if (!await resolveCommit(this.repoRootFsPath, base)) {
+			throw new Error(`Cannot resolve base ${base} to a commit.`);
+		}
 		this.invalidateBaseline();
 		this.base = base;
+		this.baseExplicit = true;
+		this.baseExplanation = undefined;
 		if (this.compare) {
 			await this.workspaceState.update(this.targetKey(this.compare), base);
+			// Set as Base promises this exact row, even if this SHA-target pair had an older pin.
+			if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(base)) {
+				await this.workspaceState.update(this.pinKey(base, this.compare), undefined);
+			}
 		}
 		await this.resolve();
 	}
@@ -283,7 +342,12 @@ export class ActiveComparison {
 	async setCompare(compare: string): Promise<void> {
 		this.invalidateBaseline();
 		this.compare = compare;
-		this.base = this.workspaceState.get<string>(this.targetKey(compare)) ?? this.base;
+		const saved = this.workspaceState.get<string>(this.targetKey(compare));
+		if (saved && !this.baseExplicit) {
+			this.base = saved;
+			this.baseExplicit = true;
+			this.baseExplanation = undefined;
+		}
 		this.compareExplicit = true;   // opt out of auto-follow — the user chose this branch
 		await this.resolve();
 	}
@@ -295,6 +359,8 @@ export class ActiveComparison {
 		this.base = this.compare;
 		this.compare = oldBase;
 		this.compareExplicit = true;   // opt out of auto-follow — the user chose this branch
+		this.baseExplicit = true;
+		this.baseExplanation = undefined;
 		if (this.base && this.compare) {
 			await this.workspaceState.update(this.targetKey(this.compare), this.base);
 		}

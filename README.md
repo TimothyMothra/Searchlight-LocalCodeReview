@@ -1,7 +1,7 @@
 # Searchlight: Local Code Review
 
 A **local-only VS Code extension** for reviewing your own git branch diffs the way you'd review a
-pull request — native inline comment threads, a four-view "PR panel", `/tag` classification, and a
+pull request — native inline comment threads, a three-view "PR panel", `/tag` classification, and a
 one-click **Ask Copilot** round-trip — all offline, with every comment stored as plain JSON on disk.
 
 > **Status:** local-only, single-developer tool. The extension **never calls a language model
@@ -13,17 +13,20 @@ one-click **Ask Copilot** round-trip — all offline, with every comment stored 
 
 ![Searchlight showing a synthetic demo review: four-view panel and inline comment threads](docs/images/screenshot.png)
 
-_Captured with the demo dataset (synthetic, no PII) — see [`DEMO.md`](./DEMO.md)._
+_Earlier four-pane layout, captured with the demo dataset (synthetic, no PII). Commits now live inside
+Comparison — see [`DEMO.md`](./DEMO.md)._
 
 ## What it does
 
-- **Four-view review panel** in a dedicated Activity Bar container, all driven by one in-memory
-  *active comparison* (`base` = target branch, `compare` = source branch under review):
-  - **Comparison** — the current `Base` / `Compare` branches; click to pick, `⇄` to swap.
+- **Three-view review panel** in a dedicated Activity Bar container, all driven by one in-memory
+  *active comparison* (`base` = target branch or commit, `compare` = source branch under review):
+  - **Comparison** — inline `Base` / `Compare` selectors above a collapsed **Commits** section,
+    loaded on first expansion and cached for reopening. **History** walks source ancestors;
+    **Review** shows `git log base..compare`. Right-click any
+    commit and choose **Set as Base** to pin its SHA, **Copy Commit SHA**, or **Open Commit Diff**.
   - **Changed Files** — a hierarchical folder tree of `git diff base...compare` with per-file
     reviewed checkboxes; click opens a native diff.
-  - **Commits** — `git log base..compare`; click copies the full SHA.
-  - **Conversations** — every comment thread for the active review; click jumps to `file:line`.
+  - **Threads** — every comment thread for the active review; click jumps to `file:line`.
 - **Native inline comment threads** — comments render as first-class VS Code `CommentController`
   threads in the editor gutter, with reply, resolve / unresolve, and copy commands.
 - **`/tag` classification** — type `/` in any comment box for autocomplete over the tag set; tags
@@ -68,7 +71,7 @@ Classify a thread by typing `/` in the comment box and picking from the autocomp
 
 Full knowledge base in [`docs/`](./docs/README.md):
 
-- [architecture.md](./docs/architecture.md) — ownership split, the four views, the
+- [architecture.md](./docs/architecture.md) — ownership split, the three views, the
   `CommentController`, and the Ask-Copilot bridge.
 - [data-model.md](./docs/data-model.md) — on-disk layout, the v2 schema, v1 back-compat, the tag set,
   and the durable `seqCounter`.

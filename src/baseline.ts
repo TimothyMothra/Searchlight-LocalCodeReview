@@ -96,6 +96,14 @@ async function resolveBaselineCore(
 		?? refs.find((ref) => ref.name === `refs/remotes/${target}`)
 		?? refs.find((ref) => ref.name === target);
 	if (!selected) {
+		// ASSUMPTION: Set as Base also accepts immutable history-row SHAs. Preserve the same
+		// ancestor validation as baseline pins; never infer a different commit for a fixed target.
+		if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(target)) {
+			const targetCommit = await resolveBaselinePin(cwd, target, compareCommit, query);
+			const commit = pin ? await resolveBaselinePin(cwd, pin, compareCommit, query) : targetCommit;
+			event('baseline.result', { outcome: 'resolved', mode: 'fixedTarget' });
+			return { commit, targetCommit, reason: 'Fixed target commit; select a branch to follow shared ancestry.' };
+		}
 		event('baseline.result', { outcome: 'targetMissing' });
 		throw new Error(`Target branch '${target}' is unavailable. Select an existing target branch.`);
 	}

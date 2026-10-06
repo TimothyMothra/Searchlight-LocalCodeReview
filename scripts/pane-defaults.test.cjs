@@ -52,14 +52,13 @@ function client(html) {
 	};
 }
 
-test('panes put collapsed Comparison and Commits above Files and Conversations', () => {
+test('panes put collapsed combined Comparison above Files and Conversations', () => {
 	const views = manifest.contributes.views.searchlight;
 	assert.deepEqual(views.map((view) => view.id), [
-		'searchlight.comparison', 'searchlight.commits', 'searchlight.files', 'searchlight.conversations',
+		'searchlight.comparison', 'searchlight.files', 'searchlight.conversations',
 	]);
 	assert.equal(views[0].visibility, 'collapsed');
-	assert.equal(views[1].visibility, 'collapsed');
-	assert.ok(views.slice(2).every((view) => !view.visibility || view.visibility === 'visible'));
+	assert.ok(views.slice(1).every((view) => !view.visibility || view.visibility === 'visible'));
 	const buttons = manifest.contributes.menus['view/title'];
 	assert.ok(!buttons.some((button) => button.command === 'searchlight.commitsViewAllChanges' && button.when.includes('searchlight.files')));
 	// Only the unused button is removed; the command remains available from the command palette.

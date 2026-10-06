@@ -33,6 +33,13 @@ Changing the inferred baseline or a pin does not rename review folders or rewrit
 `targetBranch`/`targetCommit` continue to describe the selected target, not the effective baseline.
 Pins are revalidated on refresh and can be cleared with **Auto** in the Comparison pane.
 
+**Set as Base** on a history row uses a full SHA as the selected target. Its review folder is
+`<compare>_<full-sha>/`, with that SHA in `targetBranch` and `targetCommit`. This reuses v2 fields
+without a migration and remains separate from branch-named reviews. Fixed targets are validated
+as ancestors of the source, just like pins.
+Selecting a fixed target clears any older effective-baseline pin for that same pair, so Set as Base
+always starts from the chosen row.
+
 ## 2. Sources → readers
 
 | On-disk source | Read by | Produces |

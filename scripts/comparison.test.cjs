@@ -122,6 +122,15 @@ test('pins use exact ancestor commits and reject non-IDs, unknown or rewritten c
 	await assert.rejects(resolveBaseline(repo, 'main', D, C, h.query), /no longer an ancestor/);
 });
 
+test('fixed commit targets reuse ancestor validation without substituting a baseline', async () => {
+	const h = history();
+	const fixed = await resolveBaseline(repo, A, D, undefined, h.query);
+	assert.equal(fixed.targetCommit, A);
+	assert.equal(fixed.commit, A);
+	assert.equal((await resolveBaseline(repo, A, D, B, h.query)).commit, B);
+	await assert.rejects(resolveBaseline(repo, E, D, undefined, h.query), /no longer an ancestor/);
+});
+
 test('unrelated histories and unexpected git failures are not empty comparisons', async () => {
 	const h = history();
 	h.parents[D] = [];
@@ -169,7 +178,9 @@ function comparisonFixture() {
 	const gitApi = { getHead: async () => ({ branch: 'feature', commit: D, detached: false }) };
 	const git = {
 		defaultBaseBranch: async () => 'main',
-		resolveCommit: async (_, ref) => ref === 'feature' || ref === 'other' ? D : undefined,
+		suggestBaseBranch: async () => ({ branch: 'main', explanation: 'Default target.' }),
+		resolveCommit: async (_, ref) => ref === 'feature' || ref === 'other' ? D :
+			h.parents[ref] ? ref : h.refs.find(([name]) => name.replace(/^refs\/(heads|remotes)\//, '') === ref)?.[1],
 		changedFiles: async (_, ...refs) => { calls.push(['files', ...refs]); return []; },
 		changedFilesCumulative: async (_, ref) => { calls.push(['cumulative', ref]); return []; },
 		logRange: async (_, ...refs) => { calls.push(['commits', ...refs]); return { commits: [], truncated: false }; },
@@ -250,6 +261,17 @@ test('remembered target survives reload without changing review identity to the 
 	assert.equal(reloaded.base, 'origin/main');
 });
 
+test('selecting a fixed base clears an older pin for that exact target/source pair', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	await f.active.setBaselinePin(B);
+	assert.equal(f.active.baselineCommit, B);
+	await f.active.setBase(A);
+	assert.equal(f.active.baselineCommit, A);
+	assert.equal(f.active.baselinePin, undefined);
+});
 test('a newer resolve cannot be overwritten by a delayed older HEAD query', async () => {
 	const f = comparisonFixture();
 	await f.active.computeDefaults();
@@ -311,33 +333,36 @@ test('comparison helper uses exact commit endpoints, not a second merge-base cal
 test('Comparison renders baseline/error state and routes Pin and Auto controls', () => {
 	const { ComparisonWebviewProvider } = loadCompiled('comparisonView', { vscode: {}, './gitApi': {} });
 	const provider = new ComparisonWebviewProvider(() => undefined, () => {}, () => {}, () => {}, () => {});
-	const script = provider.html().match(/<script>([\s\S]*?)<\/script>/)[1];
+	const scripts = [...provider.html().matchAll(/<script>([\s\S]*?)<\/script>/g)];
 	const nodes = new Map();
 	const node = (id) => {
 		if (!nodes.has(id)) {
 			nodes.set(id, {
 				value: '', handlers: {}, classList: { add() {}, remove() {}, toggle() {} },
 				addEventListener(event, handler) { this.handlers[event] = handler; },
+				setAttribute(name, value) { this[name] = value; },
 			});
 		}
 		return nodes.get(id);
 	};
 	const messages = [];
-	let receive;
-	new vm.Script(script).runInNewContext({
+	const receivers = [];
+	const context = vm.createContext({
 		performance: { now: () => 0 },
 		acquireVsCodeApi: () => ({ postMessage: (message) => messages.push(message.type) }),
 		document: { getElementById: node, querySelector: node, activeElement: null },
-		window: { addEventListener: (_, handler) => { receive = handler; } },
+		window: { addEventListener: (_, handler) => { receivers.push(handler); } },
 	});
+	for (const script of scripts) { new vm.Script(script[1]).runInContext(context); }
+	const receive = (event) => receivers.forEach((handler) => handler(event));
 	const state = {
 		type: 'state', branches: [], base: 'main', compare: 'feature',
 		baselineCommit: C, baselineReason: 'Auto: shared ancestor with origin/main.', ready: true,
 	};
 	receive({ data: state });
 	assert.match(node('baseline').textContent, /\(auto\)/);
-	assert.equal(node('baseline').title, C);
-	assert.equal(node('baseline-reason').textContent, state.baselineReason);
+	assert.ok(node('baseline').title.includes(C));
+	assert.ok(node('baseline').title.includes(state.baselineReason));
 	assert.equal(node('auto-baseline').disabled, true);
 	node('pin-baseline').handlers.click();
 	receive({ data: { ...state, baselineCommit: null, baselinePin: B, baselineError: 'Pin is not an ancestor.' } });

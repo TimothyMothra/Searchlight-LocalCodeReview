@@ -262,27 +262,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				comparisonProvider.postUpdateResult(row, ok, message),
 			);
 		},
-		async (reset) => {
-			await ensureComparison('pane-action');
-			// ASSUMPTION: pinning freezes a commit ID, never a moving branch expression.
-			const selectionKey = active.comparisonKey;
-			const value = reset ? undefined : await vscode.window.showInputBox({
-				title: 'Searchlight: Pin baseline commit',
-				prompt: 'Enter an ancestor commit SHA. The pin stays fixed until you choose Auto.',
-				value: active.baselinePin ?? active.baselineCommit,
-				ignoreFocusOut: true,
-			});
-			if (!reset && value === undefined) { return; }
-			try {
-				if (selectionKey !== active.comparisonKey) {
-					throw new Error('The comparison changed while entering a baseline. Try again.');
-				}
-				await active.setBaselinePin(value);
-				refreshAll('baseline-pin');
-			} catch (error) {
-				void vscode.window.showErrorMessage(`Searchlight: ${errMessage(error)}`);
-			}
-		},
 	);
 	const conversationsProvider = new ConversationsWebviewProvider(() => active, context.workspaceState);
 	const filesProvider = new FilesWebviewProvider(

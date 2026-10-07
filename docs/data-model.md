@@ -31,7 +31,8 @@ VS Code workspace state stores the selected target per source branch and an opti
 commit SHA per target/source pair. These are local UI preferences, not review-schema fields.
 Changing the inferred baseline or a pin does not rename review folders or rewrite comments.
 `targetBranch`/`targetCommit` continue to describe the selected target, not the effective baseline.
-Pins are revalidated on refresh and can be cleared with **Auto** in the Comparison pane.
+Legacy pins are revalidated on refresh. Choosing a Base branch clears an older pin for that pair;
+the Comparison UI does not expose separate Pin/Auto controls.
 
 **Set as Base** on a history row uses a full SHA as the selected target. Its review folder is
 `<compare>_<full-sha>/`, with that SHA in `targetBranch` and `targetCommit`. This reuses v2 fields

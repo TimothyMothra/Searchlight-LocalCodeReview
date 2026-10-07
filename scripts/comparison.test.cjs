@@ -36,14 +36,14 @@ function history(refs = [
 			return matches[0];
 		}
 		assert.equal(args[0], 'merge-base');
-		const left = ancestors(args[2]), right = ancestors(args[3]);
+		const offset = args[1] === '--all' || args[1] === '--is-ancestor' ? 2 : 1;
+		const left = ancestors(args[offset]), right = ancestors(args[offset + 1]);
 		if (args[1] === '--is-ancestor') {
 			return right.has(args[2]) ? '' : exit(1, 'Not an ancestor');
 		}
-		assert.equal(args[1], '--all');
 		const common = [...left].filter((id) => right.has(id));
 		const best = common.filter((id) => !common.some((other) => other !== id && ancestors(other).has(id)));
-		return best.length ? best.join('\n') : exit(1, 'No common ancestor');
+		return best.length ? (args[1] === '--all' ? best.join('\n') : best[0]) : exit(1, 'No common ancestor');
 	};
 	return { refs, parents, query, calls };
 }
@@ -55,7 +55,7 @@ test('stale local main after rebase uses the newer remote shared ancestor', asyn
 	assert.equal(result.targetCommit, A);
 	assert.match(result.reason, /shared ancestor with origin\/main/);
 	assert.ok(h.calls.filter((args) => args[0] === 'merge-base').every((args) =>
-		/^[0-9a-f]{40}$/.test(args[2]) && /^[0-9a-f]{40}$/.test(args[3])));
+		args.slice(-2).every((id) => /^[0-9a-f]{40}$/.test(id))));
 });
 
 test('advancing main does not advance the baseline beyond the divergence', async () => {
@@ -149,12 +149,23 @@ test('incomparable candidate baselines require explicit selection', async () => 
 	assert.equal((await resolveBaseline(repo, 'origin/main', D, undefined, h.query)).commit, C);
 });
 
-test('multiple merge-bases require a pin instead of an arbitrary choice', async () => {
+test('multiple merge-bases use Git default automatically while explicit commits remain exact', async () => {
 	const h = history([
 		['refs/heads/main', E, ''],
 	], { [A]: [], [B]: [A], [C]: [A], [D]: [B, C], [E]: [C, B] });
-	await assert.rejects(resolveBaseline(repo, 'main', D, undefined, h.query), /Multiple merge-bases/);
+	assert.equal((await resolveBaseline(repo, 'main', D, undefined, h.query)).commit,
+		await h.query(['merge-base', E, D]));
 	assert.equal((await resolveBaseline(repo, 'main', D, B, h.query)).commit, B);
+});
+
+test('automatic baseline accepts the 34-merge-base topology without requiring a pin', async () => {
+	const forks = Array.from({ length: 34 }, (_, index) => sha(100 + index));
+	const parents = { [A]: [], ...Object.fromEntries(forks.map((id) => [id, [A]])),
+		[D]: forks, [E]: [...forks].reverse() };
+	const h = history([['refs/remotes/origin/integration', E, '']], parents);
+	const expected = await h.query(['merge-base', E, D]);
+	const result = await resolveBaseline(repo, 'origin/integration', D, undefined, h.query);
+	assert.equal(result.commit, expected);
 });
 
 function loadCompiled(name, mocks) {
@@ -330,7 +341,7 @@ test('comparison helper uses exact commit endpoints, not a second merge-base cal
 	assert.deepEqual(calls, [['diff', '--name-status', B, D, '--']]);
 });
 
-test('Comparison renders baseline/error state and routes Pin and Auto controls', () => {
+test('Comparison retains the approved selectors without Pin/Auto controls and surfaces errors', () => {
 	const { ComparisonWebviewProvider } = loadCompiled('comparisonView', { vscode: {}, './gitApi': {} });
 	const provider = new ComparisonWebviewProvider(() => undefined, () => {}, () => {}, () => {}, () => {});
 	const scripts = [...provider.html().matchAll(/<script>([\s\S]*?)<\/script>/g)];
@@ -360,17 +371,15 @@ test('Comparison renders baseline/error state and routes Pin and Auto controls',
 		baselineCommit: C, baselineReason: 'Auto: shared ancestor with origin/main.', ready: true,
 	};
 	receive({ data: state });
-	assert.match(node('baseline').textContent, /\(auto\)/);
-	assert.ok(node('baseline').title.includes(C));
-	assert.ok(node('baseline').title.includes(state.baselineReason));
-	assert.equal(node('auto-baseline').disabled, true);
-	node('pin-baseline').handlers.click();
+	const html = provider.html();
+	assert.ok(!html.includes('id="pin-baseline"'));
+	assert.ok(!html.includes('id="auto-baseline"'));
+	assert.ok(!html.includes('Effective baseline'));
+	assert.ok(node('.branch-input[data-row="base"]').title.includes(C));
+	assert.ok(node('.branch-input[data-row="base"]').title.includes(state.baselineReason));
 	receive({ data: { ...state, baselineCommit: null, baselinePin: B, baselineError: 'Pin is not an ancestor.' } });
-	assert.match(node('baseline').textContent, /invalid pin/);
 	assert.equal(node('status').textContent, 'Pin is not an ancestor.');
-	assert.equal(node('auto-baseline').disabled, false);
-	node('auto-baseline').handlers.click();
-	assert.deepEqual(messages, ['ready', 'pinBaseline', 'autoBaseline']);
+	assert.deepEqual(messages, ['ready']);
 });
 
 function deferred() {

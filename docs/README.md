@@ -47,8 +47,9 @@ Existing `conversation`-named command IDs, settings and storage remain compatibl
   There is no server, database, or network dependency.
 - **A comparison = base + compare.** `base` is the TARGET branch or fixed commit, `compare` is the SOURCE branch
   under review. A separate **effective baseline** is inferred from local/upstream shared ancestry
-  or pinned to an explicit ancestor commit. The Comparison pane shows its SHA and reason, with
-  **Pin** and **Auto** controls. Right-click a History/Review commit for **Set as Base**.
+  or fixed to an explicit ancestor commit. Comparison keeps the approved Base/Compare selectors;
+  shared-ancestor details are in the Base tooltip, without extra Pin/Auto controls.
+  Right-click a History/Review commit for **Set as Base**.
   All three views read one `ActiveComparison`; Source/Base badges precede commit text.
 - **The model layer is `vscode`-free.** `reviewModel.ts` has no `vscode` import so the schema and
   its migrations are unit-testable in isolation; callers wrap its outputs with VS Code types.

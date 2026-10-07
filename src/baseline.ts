@@ -55,7 +55,7 @@ async function resolveBaselinePinCore(value: string, compareCommit: string, quer
 		() => query(['rev-parse', '--verify', '--end-of-options', `${id}^{commit}`]));
 	if (await ancestryQuery(query, ['merge-base', '--is-ancestor', commit, compareCommit]) === undefined) {
 		event('baseline.pinResult', { outcome: 'notAncestor' });
-		throw new Error('The pinned baseline is no longer an ancestor of the compare commit. Choose another commit or return to Auto.');
+		throw new Error('The saved baseline is no longer an ancestor of the compare commit. Select a base branch or use Set as Base on a History commit.');
 	}
 	event('baseline.pinResult', { outcome: 'resolved' });
 	return commit;
@@ -133,12 +133,10 @@ async function resolveBaselineCore(
 	const bases: { ref: TargetRef; commit: string }[] = [];
 	for (const ref of candidates) {
 		// Use captured object IDs, not moving refs, for every query in this resolution.
-		const output = await ancestryQuery(query, ['merge-base', '--all', ref.commit, compareCommit]);
+		// ASSUMPTION: real integration histories can have several best common ancestors.
+		// Match the approved automatic workflow: let Git select its default, without requiring a pin.
+		const output = await ancestryQuery(query, ['merge-base', ref.commit, compareCommit]);
 		const commits = output?.split(/\r?\n/).filter(Boolean) ?? [];
-		if (commits.length > 1) {
-			event('baseline.result', { outcome: 'multipleMergeBases', count: commits.length });
-			throw new Error(`Multiple merge-bases for '${shortRef(ref.name)}'. Pin the intended baseline commit.`);
-		}
 		if (commits.length === 1) {
 			bases.push({ ref, commit: commits[0] });
 		}
@@ -156,7 +154,7 @@ async function resolveBaselineCore(
 			best = candidate;
 		} else if (await ancestryQuery(query, ['merge-base', '--is-ancestor', candidate.commit, best.commit]) === undefined) {
 			event('baseline.result', { outcome: 'incomparableAncestors' });
-			throw new Error('Target refs have incomparable shared ancestors. Select an explicit remote target or pin the intended baseline commit.');
+			throw new Error('Target refs have incomparable shared ancestors. Select an explicit remote target or use Set as Base on a History commit.');
 		}
 	}
 	const considered = candidates.map((ref) => shortRef(ref.name)).join(', ');

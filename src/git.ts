@@ -25,6 +25,7 @@ const diagnosticOptions = new Set([
 	'--others', '--exclude-standard', '--is-ancestor', '--all',
 	'--include-root-refs',
 	'--first-parent', '--root', '--diff-merges',
+	'-g', '--contains', '--no-contains',
 ]);
 
 function commandFields(args: string[], execution: 'shell' | 'execFile'): Record<string, string> {
@@ -445,6 +446,39 @@ export interface BaseSuggestion {
 	explanation: string;
 }
 
+/** Rebase/creation evidence can identify a parent whose live ref has advanced past the fork. */
+async function recordedForkTarget(
+	cwd: string, compare: string, sourceSha: string, refs: BranchRef[], candidates: BranchRef[],
+): Promise<BranchRef | undefined> {
+	const source = refs.find((ref) => ref.kind === 'local' &&
+		ref.name === compare.replace(/^refs\/heads\//, ''));
+	if (!source) { return undefined; }
+	const log = await gitv(['log', '-g', '--max-count=200', '--pretty=format:%H%x1f%gs',
+		`refs/heads/${source.name}`, '--'], cwd);
+	for (const line of log?.split(/\r?\n/) ?? []) {
+		const [commit, message = ''] = line.split('\x1f');
+		const rebased = message.match(/^rebase \(finish\): .+ onto ([0-9a-f]{40}|[0-9a-f]{64})$/i);
+		const created = message.match(/^branch: Created from (.+)$/);
+		const fork = rebased?.[1] ?? (created ? commit : undefined);
+		if (!fork || fork === sourceSha || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(fork)) { continue; }
+		// ASSUMPTION: an old reflog entry is evidence only while its fork remains a source ancestor.
+		if (await gitv(['merge-base', '--is-ancestor', fork, sourceSha], cwd) === undefined) { continue; }
+		const output = await runGitQuery(cwd, ['for-each-ref', `--contains=${fork}`,
+			`--no-contains=${sourceSha}`, '--format=%(refname)', 'refs/heads', 'refs/remotes'],
+			16 * 1024 * 1024);
+		const qualified = new Set(output.split(/\r?\n/).map((name) => name.replace(/^refs\/(heads|remotes)\//, '')));
+		const eligible = candidates.filter((ref) => qualified.has(ref.name));
+		const named = created?.[1].replace(/^refs\/(heads|remotes)\//, '');
+		const recorded = eligible.find((ref) => ref.name === named);
+		if (recorded) { return recorded; }
+		if (new Set(eligible.map((ref) => ref.commit)).size !== 1) { return undefined; }
+		const locals = eligible.filter((ref) => ref.kind === 'local');
+		const choices = locals.length ? locals : eligible;
+		return choices.length === 1 ? choices[0] : undefined;
+	}
+	return undefined;
+}
+
 /**
  * Suggest a stacked-branch target only when the nearest first-parent branch tip is unambiguous.
  * ASSUMPTION: a nearby ancestor tip is useful evidence, not proof of the intended PR target.
@@ -476,6 +510,11 @@ export async function suggestBaseBranch(cwd: string, compare: string): Promise<B
 		!sourceNames.has(ref.name) && !upstreams.has(ref.name) && ref.commit !== sha &&
 		!(ref.kind === 'remote' && sourceNames.has(ref.name.slice(ref.name.indexOf('/') + 1))),
 	);
+	const recorded = await recordedForkTarget(cwd, compare, sha, refs, candidates);
+	if (recorded) {
+		return { branch: recorded.name,
+			explanation: 'Suggested target: validated branch creation/rebase point, even though its tip has advanced.' };
+	}
 	for (const commit of page.commits.slice(1)) {
 		const atCommit = candidates.filter((ref) => ref.commit === commit.sha);
 		if (atCommit.length === 0) {

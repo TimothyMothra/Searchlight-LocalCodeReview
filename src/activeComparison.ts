@@ -313,10 +313,8 @@ export class ActiveComparison {
 		this.baseExplanation = undefined;
 		if (this.compare) {
 			await this.workspaceState.update(this.targetKey(this.compare), base);
-			// Set as Base promises this exact row, even if this SHA-target pair had an older pin.
-			if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(base)) {
-				await this.workspaceState.update(this.pinKey(base, this.compare), undefined);
-			}
+			// A fresh Base choice replaces older pin preferences for this pair, including branch choices.
+			await this.workspaceState.update(this.pinKey(base, this.compare), undefined);
 		}
 		await this.resolve();
 	}

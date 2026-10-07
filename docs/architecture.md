@@ -60,7 +60,7 @@ supplied via a `() => active` getter:
 
 | Order | View | Default | Role |
 |-------|------|---------|------|
-| 1 | Comparison (`searchlight.comparison`) | Collapsed; embedded Commits collapsed too | Selectors, baseline/Pin/Auto, History/Review commit tree and native Set as Base |
+| 1 | Comparison (`searchlight.comparison`) | Collapsed; embedded Commits collapsed too | Base/Compare selectors, History/Review commit tree and native Set as Base |
 | 2 | Changed Files (`searchlight.files`) | All folders initially expanded | Changed files and reviewed-file checkboxes; no all-changes toolbar button |
 | 3 | Threads (`searchlight.conversations`) | Resolved threads hidden | Inline-code navigation, Read thread, resolve/reopen controls |
 
@@ -105,17 +105,18 @@ The **Effective baseline** is the exact commit used on the left of branch-review
   shared ancestor with the compare commit **by ancestry**, never by timestamp. Equal ancestors
   retain the selected target as the explanation source. An explicitly selected remote-tracking
   target uses only that ref.
-- **Pin commit...:** enter an ancestor commit SHA. It is resolved to a full ID and persisted per
-  target/source pair in VS Code workspace state. **Auto** clears the pin. Pins survive reloads
-  and target updates, but a rebase that makes the pin cease to be an ancestor blocks comparison
-  until the user clears or replaces it.
+- **Existing pin preferences:** legacy baseline pins remain scoped/revalidated for compatibility.
+  There are no separate Pin/Auto controls. Selecting a Base branch clears an older pin for that
+  pair; use Set as Base on a History commit for an exact fixed boundary.
 - **Set as Base:** right-click a commit to use its full SHA as a fixed target. The same ancestor
   validation applies; its baseline is exact, never substituted with another shared ancestor.
   A fixed-target review uses a SHA-named folder, separate from a branch-target review.
-- Missing refs, no shared ancestry, multiple merge-bases, and incomparable candidate baselines
+- Multiple valid merge-bases use Git's normal default selection, matching the approved automatic
+  workflow. This does not claim that the chosen ancestor is a unique original fork point.
+- Missing refs, no shared ancestry, and incomparable candidate baselines
   are visible errors, not empty successful comparisons or fallbacks to the target tip.
 
-The pane shows the baseline SHA and auto/pinned mode, with the full reason in its tooltip. Target selections are
+The Base input tooltip includes the baseline SHA and reason, without an extra baseline row. Target selections are
 remembered per source branch in workspace state; review folder names and `comments.json` target
 identity do not change when Auto chooses an upstream's shared ancestor.
 
@@ -135,9 +136,12 @@ Overtaken resolutions/results are discarded so an older query cannot replace a n
 
 ### Suggested targets and the embedded commit tree
 
-With no remembered/explicit target, defaults scan up to 200 first-parent source commits for the
-nearest unambiguous ancestor branch tip. Source/tracking aliases are excluded; a single local tip
-is preferred over remote aliases. Ambiguous/missing tips fall back to the repository default.
+With no remembered/explicit target, defaults use validated creation/rebase reflog evidence when
+the parent tip has advanced: the recorded fork must still be a source ancestor, and a unique
+parent candidate must contain it without containing the source head. A named creation target or
+single local alias is preferred when unambiguous. Otherwise, scan up to 200 first-parent source
+commits for the nearest unambiguous ancestor branch tip. Source/tracking aliases are excluded.
+Ambiguous/missing evidence falls back to the repository default.
 This is a suggestion, not proof of a branch's original parent. Saved targets are restored on
 startup/automatic HEAD changes; explicit current choices remain stable across manual source changes.
 

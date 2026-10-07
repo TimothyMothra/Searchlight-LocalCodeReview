@@ -124,6 +124,25 @@ test('moved targets are not presented as a proven fork branch', async (t) => {
 	assert.equal(await git.mergeBase(r.cwd, 'feature/parent', 'feature/child'), r.parent);
 });
 
+test('a validated rebase point identifies the parent after live branch tips advance', async (t) => {
+	const r = await repository(t);
+	await r.ref('feature/parent', await r.commit('parent advanced', [r.parent]));
+	await r.ref('main', await r.commit('main advanced', [r.main]));
+	const directory = path.join(r.metadata, 'logs', 'refs', 'heads', 'feature');
+	await fs.mkdir(directory, { recursive: true });
+	await fs.writeFile(path.join(directory, 'child'),
+		`${r.child} ${r.child} Test <test@example.invalid> 1700000000 +0000\t` +
+		`rebase (finish): refs/heads/feature/child onto ${r.parent}\n`);
+	const suggestion = await git.suggestBaseBranch(r.cwd, 'feature/child');
+	assert.equal(suggestion.branch, 'feature/parent');
+	const active = new ActiveComparison(r.cwd, r.cwd, memento());
+	await active.computeDefaults();
+	await active.resolve();
+	assert.equal(active.base, 'feature/parent');
+	assert.equal(active.baselineCommit, r.parent);
+	assert.equal(active.baselineError, undefined);
+});
+
 test('paginates through the root without duplicates or skipped commits', async (t) => {
 	const r = await repository(t);
 	const expected = [r.child, r.parent, r.main];

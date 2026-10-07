@@ -297,6 +297,55 @@ test('a newer resolve cannot be overwritten by a delayed older HEAD query', asyn
 	assert.equal(f.active.baselineCommit, C);
 });
 
+test('Unpin clears only this source overrides and returns to automatic selection across reloads', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	await f.active.setBaselinePin(B);
+	await f.state.update(f.active.pinKey('main', 'feature'), A);
+	await f.state.update(f.active.targetKey('other'), 'origin/main');
+	await f.active.useAutomaticBase();
+	assert.equal(f.active.base, 'main');
+	assert.equal(f.active.baselineCommit, C);
+	assert.equal(f.active.baselinePin, undefined);
+	assert.equal(f.state.get(f.active.targetKey('feature')), undefined);
+	assert.equal(f.state.get(f.active.pinKey(A, 'feature')), undefined);
+	assert.equal(f.state.get(f.active.pinKey('main', 'feature')), undefined);
+	assert.equal(f.state.get(f.active.targetKey('other')), 'origin/main');
+	const reloaded = f.create();
+	await reloaded.computeDefaults();
+	await reloaded.resolve();
+	assert.equal(reloaded.base, 'main');
+	assert.equal(reloaded.baselineCommit, C);
+});
+
+test('Unpin cannot overwrite a newer explicit Base choice during detection', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	const pending = deferred();
+	f.active.automaticBase = () => pending.promise;
+	const unpin = f.active.useAutomaticBase();
+	await f.active.setBase('origin/main');
+	pending.resolve({ branch: 'main', explanation: 'Suggested target.' });
+	await assert.rejects(unpin, /comparison changed/);
+	assert.equal(f.active.base, 'origin/main');
+	assert.equal(f.state.get(f.active.targetKey('feature')), 'origin/main');
+});
+
+test('Unpin refuses to clear a fixed Base if automatic detection has no target', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	f.active.automaticBase = async () => ({ explanation: 'No target available.' });
+	await assert.rejects(f.active.useAutomaticBase(), /No automatic Base/);
+	assert.equal(f.active.base, A);
+	assert.equal(f.state.get(f.active.targetKey('feature')), A);
+});
+
 test('single-file, cumulative and all-changes diffs use the same baseline, never the target tip', async () => {
 	const commands = [];
 	const vscode = {

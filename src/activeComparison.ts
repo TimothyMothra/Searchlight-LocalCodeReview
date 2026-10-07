@@ -319,6 +319,28 @@ export class ActiveComparison {
 		await this.resolve();
 	}
 
+	/** Remove this source's fixed override and return to the same discovery used by defaults. */
+	async useAutomaticBase(): Promise<void> {
+		const { base, compare } = this;
+		if (!compare) { throw new Error('Select a source before returning to automatic Base selection.'); }
+		const version = ++this.resolveVersion;
+		const suggestion = await this.automaticBase(compare);
+		if (!suggestion.branch) { throw new Error('No automatic Base is available. Select a branch or a History commit.'); }
+		const overtaken = () => version !== this.resolveVersion || base !== this.base || compare !== this.compare;
+		if (overtaken()) { throw new Error('The comparison changed while detecting its Base. Try again.'); }
+		// ASSUMPTION: Unpin clears only this source's override, not preferences for other comparisons.
+		await this.workspaceState.update(this.targetKey(compare), undefined);
+		if (base) { await this.workspaceState.update(this.pinKey(base, compare), undefined); }
+		await this.workspaceState.update(this.pinKey(suggestion.branch, compare), undefined);
+		if (overtaken()) { throw new Error('The comparison changed while detecting its Base. Try again.'); }
+		this.invalidateBaseline();
+		this.base = suggestion.branch;
+		this.baseExplicit = false;
+		this.baseExplanation = suggestion.explanation;
+		this.defaultBaseCompare = compare;
+		await this.resolve();
+	}
+
 	/** Pins are scoped to target/source, so changing comparisons cannot reuse an unrelated pin. */
 	async setBaselinePin(value: string | undefined): Promise<void> {
 		const { base, compare, compareCommit } = this;

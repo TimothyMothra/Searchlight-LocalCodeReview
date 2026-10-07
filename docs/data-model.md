@@ -40,6 +40,9 @@ without a migration and remains separate from branch-named reviews. Fixed target
 as ancestors of the source, just like pins.
 Selecting a fixed target clears any older effective-baseline pin for that same pair, so Set as Base
 always starts from the chosen row.
+Unpin clears only the current source's remembered target override and the applicable old/new
+baseline-pin entries, then recomputes the automatic target. Review files themselves are untouched;
+returning to a branch target selects its existing branch-named review again.
 
 ## 2. Sources → readers
 

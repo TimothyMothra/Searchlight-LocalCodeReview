@@ -24,6 +24,7 @@ Comparison — see [`DEMO.md`](./DEMO.md)._
     loaded on first expansion and cached for reopening. **History** walks source ancestors;
     **Review** shows `git log base..compare`. Right-click any
     commit and choose **Set as Base** to pin its SHA, **Copy Commit SHA**, or **Open Commit Diff**.
+    **↶ Unpin** beside Base returns to automatic branch/shared-ancestor selection.
   - **Changed Files** — a hierarchical folder tree of `git diff base...compare` with per-file
     reviewed checkboxes; click opens a native diff.
   - **Threads** — every comment thread for the active review; click jumps to `file:line`.

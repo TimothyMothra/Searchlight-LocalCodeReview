@@ -186,6 +186,11 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 						await this.onSelectCompare(msg.branch);
 					}
 					break;
+				case 'unpinBase':
+					await vscode.commands.executeCommand('searchlight.unpinBase');
+					await this.postState('unpin-base');
+					void this.view?.webview.postMessage({ type: 'unpinComplete' });
+					break;
 				case 'pullBase':
 					await this.onPull('base');
 					break;
@@ -413,6 +418,15 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-button-foreground);
   }
   .pull-btn.stale:hover { background: var(--vscode-button-hoverBackground); }
+  .unpin-btn {
+    flex: 0 0 auto; padding: 0 7px; border: none; border-radius: 2px; cursor: pointer;
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground); font: inherit; font-size: 11px;
+  }
+  .unpin-btn[hidden] { display: none; }
+  .unpin-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .unpin-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+  .unpin-btn:disabled { opacity: 0.6; cursor: default; }
   /* Always-visible per-row copy buttons (branch name / worktree path). Mirrors .pull-btn's
      theme-var styling but is shown unconditionally (unlike .pull-btn which is display:none
      until stale). Kept compact so the two glyph buttons sit next to the Update button. */
@@ -502,6 +516,7 @@ ${COMMITS_CSS}
     <label class="field-label" for="base-input">Base (target)</label>
     <div class="field-row">
       <input id="base-input" class="branch-input" data-row="base" type="text" placeholder="Select branch or right-click a commit…" autocomplete="off" spellcheck="false" />
+      <button class="unpin-btn" id="unpin-base" type="button" hidden title="Clear the fixed commit and automatically select the Base for this source">↶ Unpin</button>
       <button class="pull-btn" data-row="base" title="Fetch + fast-forward this branch to its upstream">↻ Update</button>
     </div>
     <div class="dropdown" data-row="base"></div>
@@ -540,6 +555,7 @@ ${COMMITS_CSS}
   let branches = [];
   let selected = { base: null, compare: null };
   let headBranch = null;
+  let unpinPending = false;
   const activeIndex = { base: -1, compare: -1 };
 
   const inputs = {
@@ -555,6 +571,13 @@ ${COMMITS_CSS}
     compare: document.querySelector('.pull-btn[data-row="compare"]'),
   };
   const statusEl = document.getElementById('status');
+  const unpinButton = document.getElementById('unpin-base');
+  unpinButton.addEventListener('click', () => {
+    if (unpinPending) { return; }
+    unpinPending = true;
+    unpinButton.disabled = true;
+    vscode.postMessage({ type: 'unpinBase' });
+  });
 
   // Per-row UI state: last-known stale info and last-known update error (for the ⚠ triangle).
   const staleState = { base: null, compare: null };
@@ -705,7 +728,14 @@ ${COMMITS_CSS}
 
   window.addEventListener('message', (event) => {
     const state = event.data;
+    if (state.type === 'unpinComplete') {
+      unpinPending = false;
+      unpinButton.disabled = false;
+      return;
+    }
     if (state.type === 'selectionError') {
+      unpinPending = false;
+      unpinButton.disabled = false;
       statusEl.className = 'status-bar warn';
       statusEl.textContent = '⚠ ' + state.message;
       return;
@@ -735,12 +765,14 @@ ${COMMITS_CSS}
     applyStale('compare', state.compareStale);
     renderStatus(state);
     const pinnedCommit = selected.base && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(selected.base);
+    unpinButton.hidden = !pinnedCommit && !state.baselinePin;
+    unpinButton.disabled = unpinPending;
     const explanation = document.getElementById('base-explanation');
     explanation.title = state.baseExplanation || (pinnedCommit ? 'Pinned commit: does not follow a branch.' : '');
     explanation.textContent = state.baseExplanation
       ? (state.baseExplanation.startsWith('Suggested') ? 'Suggested target' :
         state.baseExplanation.startsWith('Default') ? 'Default target' : '⚠ Target detection failed')
-      : (pinnedCommit ? 'Pinned commit · ' + selected.base.slice(0, 7) : '');
+      : '';
     reportRendered('comparison', branches.length, t0);
   });
 

@@ -552,6 +552,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await active.swap();
 			refreshAll();
 		}),
+		registerCommand('searchlight.unpinBase', async () => {
+			await active.useAutomaticBase();
+			refreshAll('unpin-base');
+		}),
 		registerCommand('searchlight.copyCompareBranch', () =>
 			comparisonProvider.copyCompareBranchName(),
 		),

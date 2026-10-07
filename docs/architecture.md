@@ -111,6 +111,10 @@ The **Effective baseline** is the exact commit used on the left of branch-review
 - **Set as Base:** right-click a commit to use its full SHA as a fixed target. The same ancestor
   validation applies; its baseline is exact, never substituted with another shared ancestor.
   A fixed-target review uses a SHA-named folder, separate from a branch-target review.
+- **Unpin:** a conditional action beside Base removes the fixed target/legacy pin for the current
+  source and reruns automatic target discovery plus shared-ancestor resolution. It does not force
+  `main`, leave the SHA target selected, or clear other sources' preferences. Reloads remain automatic.
+  The redundant pinned-commit caption is omitted; the hash is already in the input and commit list.
 - Multiple valid merge-bases use Git's normal default selection, matching the approved automatic
   workflow. This does not claim that the chosen ancestor is a unique original fork point.
 - Missing refs, no shared ancestry, and incomparable candidate baselines

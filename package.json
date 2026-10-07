@@ -248,6 +248,11 @@
         "icon": "$(git-compare)"
       },
       {
+        "command": "searchlight.unpinBase",
+        "title": "Searchlight: Unpin Base (Return to Automatic Selection)",
+        "icon": "$(discard)"
+      },
+      {
         "command": "searchlight.commitsViewAllChanges",
         "title": "Searchlight: View All Changes vs Base",
         "icon": "$(diff-multiple)"

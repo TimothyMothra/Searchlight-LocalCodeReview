@@ -11,6 +11,7 @@ const Module = require('node:module');
 // ASSUMPTION: Node's test runner has no extension host. Stub only the VS Code boundary;
 // Git reads real disposable object databases without staging or committing in the user's repo.
 const vscode = {
+	commands: { executeCommand: async () => {} },
 	extensions: { getExtension: () => undefined },
 	Uri: { file: (fsPath) => ({ fsPath }) },
 	workspace: {
@@ -141,6 +142,10 @@ test('a validated rebase point identifies the parent after live branch tips adva
 	assert.equal(active.base, 'feature/parent');
 	assert.equal(active.baselineCommit, r.parent);
 	assert.equal(active.baselineError, undefined);
+	await active.setBase(r.parent);
+	await active.useAutomaticBase();
+	assert.equal(active.base, 'feature/parent');
+	assert.equal(active.baselineCommit, r.parent);
 });
 
 test('paginates through the root without duplicates or skipped commits', async (t) => {
@@ -255,6 +260,14 @@ test('provider transports history, pinned selections, and explicit stale-source 
 	assert.ok(messages.at(-1).branches.some((b) => b.name === 'feature/parent' && b.commit === r.parent));
 	await receive({ type: 'loadCommits', mode: 'history', sourceSha: r.child, startSha: r.child, requestId: 1 });
 	assert.deepEqual(messages.at(-1).commits.map((c) => c.sha), [r.child, r.parent, r.main]);
+	await provider.setCommitAsBase({ sha: r.parent, webviewSection: 'commit' });
+	t.mock.method(vscode.commands, 'executeCommand', async (command) => {
+		assert.equal(command, 'searchlight.unpinBase');
+		await active.useAutomaticBase();
+	});
+	await receive({ type: 'unpinBase' });
+	assert.equal(active.base, 'feature/parent');
+	assert.equal(messages.at(-1).type, 'unpinComplete');
 	await provider.setCommitAsBase({ sha: r.parent, webviewSection: 'commit' });
 	assert.equal(active.base, r.parent);
 	await receive({ type: 'loadCommits', mode: 'review', sourceSha: r.child, baseSha: r.parent, requestId: 2 });
@@ -454,7 +467,8 @@ test('pinned commits and common ancestors are explained, not claimed as original
 	const sha = 'b'.repeat(40);
 	ui.state({ type: 'state', branches: [], base: sha, baseCommit: sha,
 		compare: 'child', compareCommit: 'a'.repeat(40), mergeBaseCommit: sha, ready: true });
-	assert.match(ui.get('base-explanation').textContent, /Pinned commit/);
+	assert.equal(ui.get('base-explanation').textContent, '');
+	assert.equal(ui.get('unpin-base').hidden, false);
 	assert.match(ui.get('base-explanation').title, /does not follow a branch/);
 	ui.state({ type: 'selectionError', message: 'Cannot resolve base' });
 	assert.match(ui.get('status').textContent, /Cannot resolve base/);
@@ -462,6 +476,32 @@ test('pinned commits and common ancestors are explained, not claimed as original
 	assert.ok(!ui.html.includes('Use commit'));
 });
 
+test('Unpin is conditional, prevents duplicate clicks, and hides after returning to automatic Base', () => {
+	const ui = webview();
+	const source = 'a'.repeat(40), base = 'b'.repeat(40);
+	ui.state({ type: 'state', branches: [], base, compareCommit: source });
+	assert.equal(ui.get('unpin-base').hidden, false);
+	ui.get('unpin-base').listeners.click();
+	ui.get('unpin-base').listeners.click();
+	assert.equal(ui.messages.filter((message) => message.type === 'unpinBase').length, 1);
+	assert.equal(ui.get('unpin-base').disabled, true);
+	ui.state({ type: 'state', branches: [], base: 'feature/parent', compareCommit: source,
+		baseExplanation: 'Suggested target: automatic parent.' });
+	assert.equal(ui.get('unpin-base').hidden, true);
+	ui.state({ type: 'unpinComplete' });
+	assert.equal(ui.get('unpin-base').disabled, false);
+	assert.equal(ui.get('base-explanation').textContent, 'Suggested target');
+});
+
+test('Unpin errors retain the action for retry and display failure explicitly', () => {
+	const ui = webview();
+	ui.state({ type: 'state', branches: [], base: 'b'.repeat(40), compareCommit: 'a'.repeat(40) });
+	ui.get('unpin-base').listeners.click();
+	ui.state({ type: 'selectionError', message: 'Cannot detect automatic Base.' });
+	assert.equal(ui.get('unpin-base').disabled, false);
+	assert.equal(ui.get('unpin-base').hidden, false);
+	assert.match(ui.get('status').textContent, /Cannot detect automatic Base/);
+});
 test('Review preserves the old commit range and changing base reloads only that mode', () => {
 	const ui = webview();
 	const source = 'a'.repeat(40), base = 'b'.repeat(40), newBase = 'c'.repeat(40);

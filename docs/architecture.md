@@ -156,6 +156,8 @@ Rows retain file expansion and per-file diffs; native right-click actions provid
 Copy Commit SHA and Open Commit Diff. The full row SHA is passed through `data-vscode-context`,
 scoped to commit rows, not files. Source/Base role badges precede the SHA/subject so ellipsis cannot
 hide them. BASE marks the effective baseline, not a potentially stale target branch tip.
+Comparison role tags use a 1px icon-foreground outline matching toolbar strokes; ordinary branch-name tags keep their
+subtle panel-border outline. The role badge's outer height stays unchanged.
 
 History remains usable to repair a baseline error; Review cannot load stale/invalid baseline data.
 Pending responses are tied to the source and (for Review) effective baseline, so pin/ref changes

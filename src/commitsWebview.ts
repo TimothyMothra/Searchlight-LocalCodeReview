@@ -66,6 +66,8 @@ export const COMMITS_CSS = `
 .commit-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .commit-desc { max-width: 25%; color: var(--vscode-descriptionForeground); font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; }
 .commit-badge { flex-shrink: 0; font-size: 10px; padding: 0 3px; border: 1px solid var(--vscode-panel-border); border-radius: 2px; line-height: 16px; }
+/* ASSUMPTION: role outlines match toolbar icons without changing the badge's 18px outer height. */
+.commit-role { border-width: 1px; border-color: var(--vscode-icon-foreground, var(--vscode-foreground)); line-height: 16px; }
 .commit-ref { max-width: 90px; min-width: 0; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; }
 .commit-children { display: block; }
 .commit.collapsed > .commit-children { display: none; }
@@ -151,7 +153,7 @@ function renderCommit(c) {
 	]) {
 		if (matches) {
 			const badge = document.createElement('span');
-			badge.className = 'commit-badge';
+			badge.className = 'commit-badge commit-role';
 			badge.textContent = label;
 			badge.title = title;
 			row.insertBefore(badge, shaText);

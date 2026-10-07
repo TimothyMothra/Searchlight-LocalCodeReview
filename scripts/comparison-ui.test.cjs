@@ -410,9 +410,25 @@ test('compact comparison badges precede both SHA and subject text', () => {
 		const row = ui.get('commit-rows').children[index].children[0];
 		const badge = row.querySelector('.commit-badge');
 		assert.equal(badge.textContent, label);
+		assert.ok(badge.className.includes('commit-role'));
 		assert.ok(row.children.indexOf(badge) < row.children.indexOf(row.querySelector('.commit-sha')));
 		assert.ok(row.children.indexOf(badge) < row.children.indexOf(row.querySelector('.commit-label')));
 	}
+});
+
+test('comparison role outlines match icon color and remain the original badge height', () => {
+	const ui = webview();
+	const role = ui.html.match(/\.commit-role\s*\{([^}]+)\}/)[1];
+	assert.match(role, /border-width:\s*1px/);
+	assert.match(role, /border-color:\s*var\(--vscode-icon-foreground,\s*var\(--vscode-foreground\)\)/);
+	assert.match(role, /line-height:\s*16px/);
+	const generic = ui.html.match(/\.commit-badge\s*\{([^}]+)\}/)[1];
+	assert.match(generic, /border:\s*1px solid var\(--vscode-panel-border\)/);
+	const roleWidth = Number(role.match(/border-width:\s*(\d+)px/)[1]);
+	const roleHeight = Number(role.match(/line-height:\s*(\d+)px/)[1]);
+	const genericWidth = Number(generic.match(/border:\s*(\d+)px/)[1]);
+	const genericHeight = Number(generic.match(/line-height:\s*(\d+)px/)[1]);
+	assert.equal(roleHeight + 2 * roleWidth, genericHeight + 2 * genericWidth);
 });
 
 test('history ignores stale replies and displays retryable errors', () => {

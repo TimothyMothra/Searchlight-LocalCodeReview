@@ -595,7 +595,7 @@ const FILES_CSS = `
 	justify-content: center;
 	color: var(--vscode-icon-foreground);
 }
-.glyph svg { width: 16px; height: 16px; fill: currentColor; }
+.glyph svg, .twisty svg { width: 16px; height: 16px; fill: currentColor; }
 .label { overflow: hidden; text-overflow: ellipsis; }
 .desc { color: var(--vscode-descriptionForeground); margin-left: 6px; font-size: 0.9em; }
 /* Git-status letter badge (M/A/D/R/C/U/T), colored to match the row's decoration color. */
@@ -645,7 +645,8 @@ const INDENT_PX = 8;
 // Inline SVG glyphs (currentColor) — codicons aren't bundled, so no font is loaded.
 const FILE_SVG = '<svg viewBox="0 0 16 16"><path d="M9.5 1H3.5L3 1.5v13l.5.5h9l.5-.5V5.5L9.5 1zm0 1.4L11.6 4.5H9.5V2.4zM4 14V2h4.5v3.5H12V14H4z"/></svg>';
 const FOLDER_SVG = '<svg viewBox="0 0 16 16"><path d="M14.5 3H7.7l-1-1H1.5L1 2.5v11l.5.5h13l.5-.5v-10L14.5 3zM14 13H2V3h4.3l1 1H14v9z"/></svg>';
-const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
+// ASSUMPTION: expanded artwork points down; the collapsed -90deg rotation points it right.
+const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4H4z"/></svg>';
 
 let expanded = new Set();      // relPaths of expanded folders
 let expandAll = true;

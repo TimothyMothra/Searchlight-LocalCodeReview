@@ -14,7 +14,7 @@ import { aheadBehind, BranchRef, changedFilesForCommit, commitAncestry, CommitEn
 import * as gitApi from './gitApi';
 import { PaneMetrics } from './webviewMetrics';
 import { renderMetricsScript } from './webviewShell';
-import { event, trace } from './diagnostics';
+import { event, now, trace } from './diagnostics';
 import { COMMITS_CSS, COMMITS_JS } from './commitsWebview';
 
 /** A stale row is `behind` its `upstream` (only sent when behind > 0). */
@@ -42,6 +42,8 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 	private catalogGeneration = 0;
 	private catalog?: { cwd: string; refs: BranchRef[] };
 	private catalogLoad?: { cwd: string; generation: number; promise: Promise<BranchRef[]> };
+	private nextBaseAction = 0;
+	private baseAction?: { id: number; start: number; action: 'pin' | 'unpin' };
 
 	constructor(
 		private readonly getActive: () => ActiveComparison | undefined,
@@ -63,7 +65,37 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 		if (typeof sha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)) {
 			throw new Error('Set as Base requires a full commit SHA.');
 		}
-		await this.onSelectBase(sha);
+		await this.runBaseAction('pin', sha, () => this.onSelectBase(sha));
+	}
+
+	async unpinBase(work: () => Promise<void>): Promise<void> {
+		await this.runBaseAction('unpin', this.getActive()?.automaticBaseHint?.base, work);
+	}
+
+	private async runBaseAction(action: 'pin' | 'unpin', preview: string | undefined, work: () => void | Promise<void>): Promise<void> {
+		const id = ++this.nextBaseAction;
+		this.baseAction = { id, start: now(), action };
+		await trace(`comparison.${action}Action`, async () => {
+			void this.view?.webview.postMessage({
+				type: 'baseActionStart', id, action, preview: preview ?? null,
+				sourceCommit: this.getActive()?.compareCommit ?? null,
+			});
+			try {
+				await work();
+				await this.postState(`${action}-complete`);
+				if (this.baseAction?.id === id) {
+					void this.view?.webview.postMessage({ type: 'baseActionEnd', id, ok: true,
+						base: this.getActive()?.base ?? null });
+				}
+			} catch (error) {
+				await this.postState(`${action}-error`);
+				if (this.baseAction?.id === id) {
+					void this.view?.webview.postMessage({ type: 'baseActionEnd', id, ok: false,
+						base: this.getActive()?.base ?? null });
+				}
+				throw error;
+			}
+		}, { actionId: id, cachedPreview: action === 'unpin' && !!preview });
 	}
 
 	setCommitsExpanded(value: boolean): void {
@@ -73,6 +105,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 	invalidateBranches(): void {
 		this.catalogGeneration++;
 		this.catalog = undefined;
+		this.getActive()?.invalidateAutomaticBaseCache();
 		this.stateVersion++;
 		event('comparison.catalogInvalidated');
 	}
@@ -166,6 +199,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 		webviewView.webview.onDidReceiveMessage(async (msg: {
 			type: string; branch?: string; sourceSha?: string; startSha?: string; baseSha?: string;
 			mode?: string; requestId?: number; sha?: string; relPath?: string;
+			id?: number; ms?: number;
 		}) => {
 			try {
 				switch (msg.type) {
@@ -188,8 +222,19 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 					break;
 				case 'unpinBase':
 					await vscode.commands.executeCommand('searchlight.unpinBase');
-					await this.postState('unpin-base');
-					void this.view?.webview.postMessage({ type: 'unpinComplete' });
+					break;
+				case 'baseActionFeedback':
+				case 'baseActionSelector':
+				case 'baseActionContent':
+					if (this.baseAction && msg.id === this.baseAction.id && typeof msg.ms === 'number' &&
+						Number.isFinite(msg.ms) && msg.ms >= 0) {
+						const name = msg.type === 'baseActionFeedback' ? 'comparison.baseFeedbackDom' :
+							msg.type === 'baseActionSelector' ? 'comparison.baseSelectorDom' : 'comparison.baseContentDom';
+						event(name, {
+							action: this.baseAction.action, actionId: msg.id,
+							clientDomMs: msg.ms, sinceActionStartMs: now() - this.baseAction.start,
+						});
+					}
 					break;
 				case 'pullBase':
 					await this.onPull('base');
@@ -341,6 +386,7 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
 			compareCommit: active.compareCommit ?? null,
 			mergeBaseCommit: active.baselinePin ? null : active.baselineCommit ?? null,
 			baseExplanation: active.baseExplanation ?? null,
+			automaticBaseHint: active.automaticBaseHint ?? null,
 			baselineCommit: active.baselineCommit ?? null,
 			baselinePin: active.baselinePin ?? null,
 			baselineReason: active.baselineReason,
@@ -490,10 +536,9 @@ export class ComparisonWebviewProvider implements vscode.WebviewViewProvider {
     border-radius: 2px;
     font-size: 12px;
   }
-  .status-bar:empty, .explanation:empty { display: none; }
+  .status-bar:empty { display: none; }
   .status-bar.ok { color: var(--vscode-testing-iconPassed, #3fb950); }
   .status-bar.warn { color: var(--vscode-editorWarning-foreground, #d29922); }
-  .explanation { font-size: 11px; margin-bottom: 4px; color: var(--vscode-descriptionForeground); }
 ${COMMITS_CSS}
   .warn-tri { color: var(--vscode-editorWarning-foreground, #d29922); margin-left: 4px; }
   .pull-btn:disabled { opacity: 0.85; cursor: default; }
@@ -532,10 +577,10 @@ ${COMMITS_CSS}
   </div>
 
   <div class="status-bar" id="status" role="status"></div>
-  <div class="explanation" id="base-explanation"></div>
   </div>
   <div class="commit-pane collapsed" id="commit-pane">
     <button class="commit-toggle" id="commit-toggle" type="button" aria-expanded="false" aria-controls="commit-content">▸ Commits</button>
+    <div class="commit-progress" id="commit-progress" role="progressbar" aria-label="Updating comparison" hidden></div>
     <div class="commit-content" id="commit-content" hidden>
       <div class="commit-toolbar">
         <button class="mode-btn" id="commit-history" type="button" aria-pressed="true" title="First-parent source history; right-click a commit to Set as Base">↶ History</button>
@@ -556,6 +601,10 @@ ${COMMITS_CSS}
   let selected = { base: null, compare: null };
   let headBranch = null;
   let unpinPending = false;
+  let baseActionId = 0;
+  let baseActionPending = false;
+  let currentSourceCommit = null;
+  let automaticBaseHint = null;
   const activeIndex = { base: -1, compare: -1 };
 
   const inputs = {
@@ -576,6 +625,10 @@ ${COMMITS_CSS}
     if (unpinPending) { return; }
     unpinPending = true;
     unpinButton.disabled = true;
+    baseActionPending = true;
+    inputs.base.setAttribute('aria-busy', 'true');
+    if (automaticBaseHint) { inputs.base.value = automaticBaseHint.base; }
+    document.getElementById('commit-progress').hidden = false;
     vscode.postMessage({ type: 'unpinBase' });
   });
 
@@ -708,10 +761,16 @@ ${COMMITS_CSS}
   }
 
   function renderStatus(state) {
-    inputs.base.title = [state.base, state.baselineCommit, state.baselineReason].filter(Boolean).join('\\n');
+    // ASSUMPTION: successful selection details belong in the tooltip, not a persistent caption.
+    const fixedCommit = state.base && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(state.base);
+    const explanation = state.baseExplanation || (fixedCommit ? 'Fixed commit: does not follow a branch.' : '');
+    inputs.base.title = [state.base, state.baselineCommit, state.baselineReason, explanation].filter(Boolean).join('\\n');
     if (state.baselineError) {
       statusEl.className = 'status-bar warn';
       statusEl.textContent = state.baselineError;
+    } else if (state.baseExplanation && state.baseExplanation.startsWith('Target discovery failed:')) {
+      statusEl.className = 'status-bar warn';
+      statusEl.textContent = state.baseExplanation;
     } else if (state.sameBranch && !state.baselinePin) {
       statusEl.className = 'status-bar warn';
       statusEl.textContent = '⚠ Same branch selected';
@@ -722,18 +781,37 @@ ${COMMITS_CSS}
       statusEl.textContent = '';
     } else {
       statusEl.className = 'status-bar';
-      statusEl.textContent = 'Select a base and compare branch.';
+      statusEl.textContent = '';
     }
   }
 
   window.addEventListener('message', (event) => {
     const state = event.data;
-    if (state.type === 'unpinComplete') {
+    if (state.type === 'baseActionStart') {
+      if (state.sourceCommit && currentSourceCommit && state.sourceCommit !== currentSourceCommit) { return; }
+      const start = performance.now();
+      baseActionId = state.id;
+      baseActionPending = true;
+      if (state.preview) { inputs.base.value = state.preview; }
+      inputs.base.setAttribute('aria-busy', 'true');
+      vscode.postMessage({ type: 'baseActionFeedback', id: state.id, ms: performance.now() - start });
+      return;
+    }
+    if (state.type === 'baseActionEnd') {
+      if (state.id !== baseActionId) { return; }
+      const start = performance.now();
+      baseActionPending = false;
+      inputs.base.setAttribute('aria-busy', 'false');
+      inputs.base.value = state.base || selected.base || '';
       unpinPending = false;
       unpinButton.disabled = false;
+      vscode.postMessage({ type: 'baseActionSelector', id: state.id, ms: performance.now() - start });
       return;
     }
     if (state.type === 'selectionError') {
+      baseActionPending = false;
+      inputs.base.setAttribute('aria-busy', 'false');
+      inputs.base.value = selected.base || '';
       unpinPending = false;
       unpinButton.disabled = false;
       statusEl.className = 'status-bar warn';
@@ -754,12 +832,21 @@ ${COMMITS_CSS}
     }
     if (state.type !== 'state') { return; }
     const t0 = performance.now();
+    if (currentSourceCommit && currentSourceCommit !== state.compareCommit) {
+      baseActionPending = false;
+      baseActionId = 0;
+      unpinPending = false;
+      unpinButton.disabled = false;
+      inputs.base.setAttribute('aria-busy', 'false');
+    }
+    currentSourceCommit = state.compareCommit;
+    automaticBaseHint = state.automaticBaseHint || null;
     branches = state.branches || [];
     selected.base = state.base;
     selected.compare = state.compare;
     headBranch = state.headBranch;
     // Reflect selection into inputs only when the field isn't being actively edited.
-    if (document.activeElement !== inputs.base) { inputs.base.value = state.base || ''; }
+    if (!baseActionPending && document.activeElement !== inputs.base) { inputs.base.value = state.base || ''; }
     if (document.activeElement !== inputs.compare) { inputs.compare.value = state.compare || ''; }
     applyStale('base', state.baseStale);
     applyStale('compare', state.compareStale);
@@ -767,12 +854,6 @@ ${COMMITS_CSS}
     const pinnedCommit = selected.base && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(selected.base);
     unpinButton.hidden = !pinnedCommit && !state.baselinePin;
     unpinButton.disabled = unpinPending;
-    const explanation = document.getElementById('base-explanation');
-    explanation.title = state.baseExplanation || (pinnedCommit ? 'Pinned commit: does not follow a branch.' : '');
-    explanation.textContent = state.baseExplanation
-      ? (state.baseExplanation.startsWith('Suggested') ? 'Suggested target' :
-        state.baseExplanation.startsWith('Default') ? 'Default target' : '⚠ Target detection failed')
-      : '';
     reportRendered('comparison', branches.length, t0);
   });
 

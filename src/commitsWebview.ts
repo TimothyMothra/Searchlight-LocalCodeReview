@@ -13,6 +13,21 @@ export const COMMITS_CSS = `
 .commit-toggle:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 .commit-content { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .commit-content[hidden] { display: none; }
+.commit-progress { height: 2px; flex: 0 0 auto; overflow: hidden; position: relative; }
+/* ASSUMPTION: the 2px progress slot stays reserved, so loading never moves the commit rows. */
+.commit-progress[hidden] { display: block; visibility: hidden; }
+.commit-progress[hidden]::before { animation: none; }
+.commit-progress::before {
+	content: ''; position: absolute; left: 0; width: 2%; height: 100%;
+	background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+	/* ASSUMPTION: essential progress motion stays enabled, as in VS Code's native progress bar. */
+	animation: commit-progress-slide 4s linear infinite;
+}
+@keyframes commit-progress-slide {
+	from { transform: translateX(0%) scaleX(1); }
+	50% { transform: translateX(2500%) scaleX(3); }
+	to { transform: translateX(4900%) scaleX(1); }
+}
 .commit-toolbar { display: flex; justify-content: flex-end; align-items: center; gap: 4px; padding: 5px 0; }
 .mode-btn, .more-btn {
 	padding: 3px 6px; border: 1px solid transparent; border-radius: 2px; cursor: pointer;
@@ -77,12 +92,13 @@ export const COMMITS_CSS = `
 @media (max-width: 350px) { .commit-desc, .commit-ref { display: none; } }
 `;
 
-/** Runs after the selector script, sharing only its `vscode` message channel. */
+/** Runs after the selector script, sharing its message channel and immediate pending-action flag. */
 export const COMMITS_JS = `
 (() => {
 const rows = document.getElementById('commit-rows');
 const status = document.getElementById('commit-status');
 const more = document.getElementById('commit-more');
+const progress = document.getElementById('commit-progress');
 const pane = document.getElementById('commit-pane');
 const toggleButton = document.getElementById('commit-toggle');
 const content = document.getElementById('commit-content');
@@ -94,7 +110,8 @@ const modeButtons = {
 // Inline SVG glyphs (currentColor) — codicons aren't bundled, so no font is loaded.
 const COMMIT_SVG = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M10.5 8a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM8 6.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/><path d="M1 7.5h4.05v1H1zM10.95 7.5H15v1h-4.05z"/></svg>';
 const FILE_SVG = '<svg viewBox="0 0 16 16"><path d="M9.5 1H3.5L3 1.5v13l.5.5h9l.5-.5V5.5L9.5 1zm0 1.4L11.6 4.5H9.5V2.4zM4 14V2h4.5v3.5H12V14H4z"/></svg>';
-const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4V4z"/></svg>';
+// ASSUMPTION: expanded artwork points down; the collapsed -90deg rotation points it right.
+const CHEVRON_SVG = '<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4H4z"/></svg>';
 let commits = [];
 let truncated = false;
 let expanded = new Set();
@@ -108,6 +125,10 @@ let requestId = 0;
 let requestKey = '';
 let sectionOpen = false;
 let loaded = false;
+let actionPending = false;
+let actionId = 0;
+let actionStart = 0;
+let actionReported = false;
 
 function basename(p) {
 	const i = p.lastIndexOf('/');
@@ -238,6 +259,7 @@ function renderCommit(c) {
 }
 
 function paint() {
+	progress.hidden = !(actionPending || baseActionPending || (sectionOpen && pending));
 	// ASSUMPTION: collapsed commits do not need DOM work; retain data until the user expands again.
 	if (!sectionOpen) { return; }
 	const focusedSha = rows.querySelector('.commit-row:focus')?.getAttribute('data-vscode-context');
@@ -270,6 +292,10 @@ function paint() {
 		button.setAttribute('aria-pressed', String(mode === name));
 	}
 	modeButtons.review.disabled = !comparison.baseCommit || !!comparison.baselineError;
+	if (actionId && !actionReported && !actionPending && !pending) {
+		actionReported = true;
+		vscode.postMessage({ type: 'baseActionContent', id: actionId, ms: performance.now() - actionStart });
+	}
 }
 
 function load() {
@@ -319,15 +345,31 @@ toggleButton.addEventListener('click', () => {
 	updateDisclosure();
 	if (sectionOpen) {
 		if (!loaded) { load(); }
-		paint();
 	}
+	paint();
 });
 updateDisclosure();
+progress.hidden = true;
 
 window.addEventListener('message', (e) => {
 	const m = e.data;
-	if (m.type === 'state') {
+	if (m.type === 'baseActionStart') {
+		if (m.sourceCommit && comparison.compareCommit && m.sourceCommit !== comparison.compareCommit) { return; }
+		actionId = m.id;
+		actionStart = performance.now();
+		actionPending = true;
+		actionReported = false;
+		paint();
+	} else if (m.type === 'baseActionEnd') {
+		if (m.id !== actionId) { return; }
+		actionPending = false;
+		paint();
+	} else if (m.type === 'selectionError') {
+		actionPending = false;
+		paint();
+	} else if (m.type === 'state') {
 		const changedSource = comparison.compareCommit !== m.compareCommit;
+		if (changedSource) { actionId = 0; actionPending = false; }
 		comparison = m;
 		const key = mode + ':' + m.compareCommit + (mode === 'review' ? ':' + m.baseCommit + ':' + !!m.baselineError : '');
 		if (changedSource) { expanded.clear(); filesBySha.clear(); }

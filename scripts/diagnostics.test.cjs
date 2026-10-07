@@ -97,6 +97,59 @@ test('disabled diagnostics do not record work and re-enabling marks a partial ru
 	assert.equal(diagnostics.diagnosticsSnapshot().continuousCapture, false);
 });
 
+test('Base action traces cover early feedback and settled content without recording private refs', async () => {
+	const lines = begin();
+	const messages = [];
+	let release;
+	const wait = new Promise((resolve) => { release = resolve; });
+	const active = { compareCommit: 'private-source-id', base: 'private-target' };
+	const { ComparisonWebviewProvider } = loadCompiled('comparisonView', {
+		vscode: {}, './gitApi': {}, './webviewMetrics': { PaneMetrics: class { bind() {} } },
+	});
+	const provider = new ComparisonWebviewProvider(() => active, async () => { await wait; }, () => {}, () => {});
+	let receive;
+	provider.postState = async () => { messages.push({ type: 'state' }); };
+	provider.resolveWebviewView({ webview: {
+		postMessage: (message) => { messages.push(message); return Promise.resolve(true); },
+		onDidReceiveMessage: (handler) => { receive = handler; },
+	} });
+	messages.length = 0;
+	const pin = provider.setCommitAsBase('b'.repeat(40));
+	assert.equal(messages[0].type, 'baseActionStart');
+	assert.ok(diagnostics.diagnosticsSnapshot().pending.some((span) => span.name === 'comparison.pinAction'));
+	release();
+	await pin;
+	assert.deepEqual(messages.map((message) => message.type), ['baseActionStart', 'state', 'baseActionEnd']);
+	const id = messages[0].id;
+	for (const type of ['baseActionFeedback', 'baseActionSelector', 'baseActionContent']) {
+		await receive({ type, id, ms: 1 });
+	}
+	const snapshot = diagnostics.diagnosticsSnapshot();
+	const action = snapshot.records.find((record) => record.name === 'comparison.pinAction' && record.kind === 'end');
+	assert.equal(action.outcome, 'ok');
+	assert.equal(action.fields.cachedPreview, false);
+	assert.ok(action.fields.actionId > 0);
+	assert.ok(['comparison.baseFeedbackDom', 'comparison.baseSelectorDom', 'comparison.baseContentDom'].every((name) =>
+		snapshot.records.some((record) => record.name === name && record.fields.actionId === id)));
+	assert.ok(lines.every((line) => !line.includes(active.base) && !line.includes(active.compareCommit) && !line.includes('b'.repeat(40))));
+	diagnostics.setDiagnosticsEnabled(false);
+});
+
+test('a failed Base action ends progress explicitly and is recorded as an error', async () => {
+	begin();
+	const messages = [];
+	const { ComparisonWebviewProvider } = loadCompiled('comparisonView', {
+		vscode: {}, './gitApi': {}, './webviewMetrics': { PaneMetrics: class {} },
+	});
+	const provider = new ComparisonWebviewProvider(() => ({ base: 'parent' }), () => {}, () => {}, () => {});
+	provider.view = { webview: { postMessage: (message) => { messages.push(message); return Promise.resolve(true); } } };
+	provider.postState = async () => {};
+	await assert.rejects(provider.unpinBase(async () => { throw new Error('private failure'); }), /private failure/);
+	assert.equal(messages.at(-1).type, 'baseActionEnd');
+	assert.equal(messages.at(-1).ok, false);
+	assert.equal(diagnostics.diagnosticsSnapshot().aggregates['comparison.unpinAction'].errors, 1);
+	diagnostics.setDiagnosticsEnabled(false);
+});
 test('pending retention is bounded and disabling logging while a span runs still clears it', async () => {
 	begin();
 	let release;

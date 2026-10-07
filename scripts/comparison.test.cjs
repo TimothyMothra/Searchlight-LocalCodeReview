@@ -213,7 +213,7 @@ function comparisonFixture() {
 	};
 	const { ActiveComparison } = loadCompiled('activeComparison', mocks);
 	const create = () => new ActiveComparison(repo, repo, state);
-	return { h, state, calls, gitApi, create, active: create(), reviewStore: mocks['./reviewStore'] };
+	return { h, state, calls, git, gitApi, create, active: create(), reviewStore: mocks['./reviewStore'] };
 }
 
 test('pins persist across reloads, invalidate caches, reset to Auto, and stay scoped to a comparison', async () => {
@@ -340,12 +340,103 @@ test('Unpin refuses to clear a fixed Base if automatic detection has no target',
 	await f.active.computeDefaults();
 	await f.active.resolve();
 	await f.active.setBase(A);
+	f.active.invalidateAutomaticBaseCache();
 	f.active.automaticBase = async () => ({ explanation: 'No target available.' });
 	await assert.rejects(f.active.useAutomaticBase(), /No automatic Base/);
 	assert.equal(f.active.base, A);
 	assert.equal(f.state.get(f.active.targetKey('feature')), A);
 });
 
+test('warm Unpin validates cached refs instead of rediscovering the automatic target', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	assert.equal(f.active.automaticBaseHint.base, 'main');
+	await f.active.setBase(A);
+	f.active.automaticBase = async () => { throw new Error('Unexpected target rediscovery'); };
+	await f.active.useAutomaticBase();
+	assert.equal(f.active.base, 'main');
+	assert.equal(f.active.baselineCommit, C);
+});
+
+test('a moved cached target triggers rediscovery instead of reusing stale automatic data', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	f.h.refs[0][1] = B;
+	let discovered = 0;
+	f.active.automaticBase = async () => {
+		discovered++;
+		return { branch: 'origin/main', explanation: 'Suggested target.' };
+	};
+	await f.active.useAutomaticBase();
+	assert.equal(discovered, 1);
+	assert.equal(f.active.base, 'origin/main');
+});
+
+test('explicit ref invalidation retains the display hint but prevents authoritative cache reuse', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	f.active.invalidateAutomaticBaseCache();
+	assert.equal(f.active.automaticBaseHint.base, 'main');
+	let discovered = 0;
+	f.active.automaticBase = async () => {
+		discovered++;
+		return { branch: 'main', explanation: 'Suggested target.' };
+	};
+	await f.active.useAutomaticBase();
+	assert.equal(discovered, 1);
+});
+
+test('a ref invalidation arriving during cache validation requires fresh discovery', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	await f.active.setBase(A);
+	const pending = deferred();
+	const resolve = f.git.resolveCommit;
+	f.git.resolveCommit = async (cwd, ref) => ref === 'main' ? pending.promise : resolve(cwd, ref);
+	let discovered = 0;
+	f.active.automaticBase = async () => {
+		discovered++;
+		return { branch: 'origin/main', explanation: 'Suggested target.' };
+	};
+	const unpin = f.active.useAutomaticBase();
+	f.active.invalidateAutomaticBaseCache();
+	pending.resolve(A);
+	await unpin;
+	assert.equal(discovered, 1);
+	assert.equal(f.active.base, 'origin/main');
+});
+
+test('cached automatic hints are never shared with a different source or repository', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	assert.equal(f.active.automaticBaseHint.base, 'main');
+	f.active.compare = 'other';
+	assert.equal(f.active.automaticBaseHint, undefined);
+	f.active.compare = 'feature';
+	f.active.repoRootFsPath = 'another-repository';
+	assert.equal(f.active.automaticBaseHint, undefined);
+});
+
+test('an older pin validation cannot replace a newly selected Base', async () => {
+	const f = comparisonFixture();
+	await f.active.computeDefaults();
+	await f.active.resolve();
+	const pending = deferred();
+	const resolve = f.git.resolveCommit;
+	f.git.resolveCommit = async (cwd, ref) => ref === A ? pending.promise : resolve(cwd, ref);
+	const pin = f.active.setBase(A);
+	await f.active.setBase('origin/main');
+	pending.resolve(A);
+	await assert.rejects(pin, /comparison changed/);
+	assert.equal(f.active.base, 'origin/main');
+});
 test('single-file, cumulative and all-changes diffs use the same baseline, never the target tip', async () => {
 	const commands = [];
 	const vscode = {
@@ -460,7 +551,9 @@ function catalogFixture() {
 	const states = [];
 	let staleQueries = 0;
 	let head = 'feature';
-	const active = { repoRootFsPath: 'repo-a', comparisonKey: 'pair-a', base: 'main', compare: 'feature', baselineCommit: A };
+	const active = { repoRootFsPath: 'repo-a', comparisonKey: 'pair-a', base: 'main', compare: 'feature', baselineCommit: A,
+		invalidateAutomaticBaseCache() {},
+	};
 	const gitApi = {
 		listBranches: (cwd) => {
 			const request = { cwd, ...deferred() };

@@ -263,11 +263,11 @@ test('provider transports history, pinned selections, and explicit stale-source 
 	await provider.setCommitAsBase({ sha: r.parent, webviewSection: 'commit' });
 	t.mock.method(vscode.commands, 'executeCommand', async (command) => {
 		assert.equal(command, 'searchlight.unpinBase');
-		await active.useAutomaticBase();
+		await provider.unpinBase(() => active.useAutomaticBase());
 	});
 	await receive({ type: 'unpinBase' });
 	assert.equal(active.base, 'feature/parent');
-	assert.equal(messages.at(-1).type, 'unpinComplete');
+	assert.equal(messages.at(-1).type, 'baseActionEnd');
 	await provider.setCommitAsBase({ sha: r.parent, webviewSection: 'commit' });
 	assert.equal(active.base, r.parent);
 	await receive({ type: 'loadCommits', mode: 'review', sourceSha: r.child, baseSha: r.parent, requestId: 2 });
@@ -467,9 +467,9 @@ test('pinned commits and common ancestors are explained, not claimed as original
 	const sha = 'b'.repeat(40);
 	ui.state({ type: 'state', branches: [], base: sha, baseCommit: sha,
 		compare: 'child', compareCommit: 'a'.repeat(40), mergeBaseCommit: sha, ready: true });
-	assert.equal(ui.get('base-explanation').textContent, '');
+	assert.ok(!ui.html.includes('id="base-explanation"'));
 	assert.equal(ui.get('unpin-base').hidden, false);
-	assert.match(ui.get('base-explanation').title, /does not follow a branch/);
+	assert.match(ui.get('.branch-input[data-row="base"]').title, /does not follow a branch/);
 	ui.state({ type: 'selectionError', message: 'Cannot resolve base' });
 	assert.match(ui.get('status').textContent, /Cannot resolve base/);
 	assert.ok(!ui.html.includes('Browse ancestry'));
@@ -486,11 +486,38 @@ test('Unpin is conditional, prevents duplicate clicks, and hides after returning
 	assert.equal(ui.messages.filter((message) => message.type === 'unpinBase').length, 1);
 	assert.equal(ui.get('unpin-base').disabled, true);
 	ui.state({ type: 'state', branches: [], base: 'feature/parent', compareCommit: source,
-		baseExplanation: 'Suggested target: automatic parent.' });
+		baseExplanation: 'Suggested target: automatic parent.', ready: true });
 	assert.equal(ui.get('unpin-base').hidden, true);
-	ui.state({ type: 'unpinComplete' });
+	ui.state({ type: 'baseActionStart', id: 1, sourceCommit: source });
+	ui.state({ type: 'baseActionEnd', id: 1, ok: true, base: 'feature/parent' });
 	assert.equal(ui.get('unpin-base').disabled, false);
-	assert.equal(ui.get('base-explanation').textContent, 'Suggested target');
+	assert.equal(ui.get('status').textContent, '');
+	assert.match(ui.get('.branch-input[data-row="base"]').title, /Suggested target: automatic parent/);
+});
+
+test('automatic target captions stay quiet while discovery failures remain explicit', () => {
+	const ui = webview();
+	const state = { type: 'state', branches: [], base: 'parent', compareCommit: 'a'.repeat(40), ready: true };
+	for (const reason of ['Suggested target: verified ancestry.', 'Default target: no unambiguous candidate.']) {
+		ui.state({ ...state, baseExplanation: reason });
+		assert.equal(ui.get('status').textContent, '');
+		assert.ok(ui.get('.branch-input[data-row="base"]').title.includes(reason));
+	}
+	const failure = 'Target discovery failed: Git read failed. Using the repository default.';
+	ui.state({ ...state, baseExplanation: failure });
+	assert.equal(ui.get('status').textContent, failure);
+});
+
+test('unselected or temporarily unresolved comparisons do not insert an instructional status row', () => {
+	const ui = webview();
+	ui.state({ type: 'state', branches: [], base: null, compare: null, ready: false });
+	assert.equal(ui.get('status').textContent, '');
+	ui.state({ type: 'state', branches: [], base: 'parent', compare: 'feature', ready: false });
+	assert.equal(ui.get('status').textContent, '');
+	ui.state({ type: 'state', branches: [], base: 'parent', compare: 'parent', sameBranch: true });
+	assert.equal(ui.get('status').textContent, '⚠ Same branch selected');
+	ui.state({ type: 'state', branches: [], baselineError: 'No common ancestor found.' });
+	assert.equal(ui.get('status').textContent, 'No common ancestor found.');
 });
 
 test('Unpin errors retain the action for retry and display failure explicitly', () => {
@@ -523,6 +550,96 @@ test('Review preserves the old commit range and changing base reloads only that 
 	assert.equal(ui.get('commit-review').getAttribute('aria-pressed'), 'true');
 });
 
+test('cached Unpin feedback updates the textbox immediately without requesting closed commit data', () => {
+	const ui = webview();
+	const source = 'a'.repeat(40);
+	ui.state({ type: 'state', branches: [], base: 'b'.repeat(40), compareCommit: source,
+		automaticBaseHint: { base: 'feature/parent', baselineCommit: 'c'.repeat(40) } });
+	ui.get('unpin-base').listeners.click();
+	assert.equal(ui.get('.branch-input[data-row="base"]').value, 'feature/parent');
+	assert.equal(ui.get('commit-progress').hidden, false);
+	assert.equal(ui.messages.filter((message) => message.type === 'loadCommits').length, 0);
+	ui.state({ type: 'baseActionStart', id: 1, sourceCommit: source, preview: 'feature/parent' });
+	assert.ok(ui.messages.some((message) => message.type === 'baseActionFeedback'));
+	ui.state({ type: 'baseActionEnd', id: 1, ok: true, base: 'feature/parent' });
+	assert.equal(ui.get('commit-progress').hidden, true);
+});
+
+test('pin feedback previews the selected hash and failure restores the authoritative Base', () => {
+	const ui = webview();
+	const source = 'a'.repeat(40), pin = 'b'.repeat(40);
+	ui.state({ type: 'state', branches: [], base: 'feature/parent', compareCommit: source });
+	ui.state({ type: 'baseActionStart', id: 2, sourceCommit: source, preview: pin });
+	assert.equal(ui.get('.branch-input[data-row="base"]').value, pin);
+	assert.equal(ui.get('commit-progress').hidden, false);
+	ui.state({ type: 'baseActionEnd', id: 2, ok: false, base: 'feature/parent' });
+	assert.equal(ui.get('.branch-input[data-row="base"]').value, 'feature/parent');
+	assert.equal(ui.get('commit-progress').hidden, true);
+});
+
+test('horizontal progress covers the Review reload and ignores older action completion', () => {
+	const ui = webview();
+	const source = 'a'.repeat(40), base = 'b'.repeat(40), changed = 'c'.repeat(40);
+	const state = { type: 'state', branches: [], base: 'parent', baseCommit: base, compareCommit: source };
+	ui.state(state);
+	ui.get('commit-toggle').listeners.click();
+	ui.get('commit-review').listeners.click();
+	const initial = ui.messages.at(-1);
+	ui.state({ ...initial, type: 'commitPage', commits: [] });
+	ui.state({ type: 'baseActionStart', id: 3, sourceCommit: source, preview: changed });
+	ui.state({ ...state, base: changed, baseCommit: changed });
+	const request = ui.messages.findLast((message) => message.type === 'loadCommits');
+	ui.state({ type: 'baseActionEnd', id: 2, ok: true, base: 'old' });
+	assert.equal(ui.get('commit-progress').hidden, false);
+	ui.state({ type: 'baseActionEnd', id: 3, ok: true, base: changed });
+	assert.equal(ui.get('commit-progress').hidden, false);
+	ui.state({ ...request, type: 'commitPage', commits: [] });
+	assert.equal(ui.get('commit-progress').hidden, true);
+	assert.ok(ui.messages.some((message) => message.type === 'baseActionContent' && message.id === 3));
+});
+
+test('essential progress keeps its sweep under reduced motion, matching native VS Code progress', () => {
+	const ui = webview();
+	assert.match(ui.html, /animation:\s*commit-progress-slide\s+4s\s+linear\s+infinite/);
+	assert.match(ui.html, /width:\s*2%;\s*height:\s*100%/);
+	assert.match(ui.html, /50%\s*\{\s*transform:\s*translateX\(2500%\)\s+scaleX\(3\)/);
+	assert.match(ui.html, /to\s*\{\s*transform:\s*translateX\(4900%\)\s+scaleX\(1\)/);
+	assert.ok(!ui.html.includes('prefers-reduced-motion'));
+	assert.match(ui.html, /\.commit-progress\s*\{[^}]*height:\s*2px;\s*flex:\s*0\s+0\s+auto/);
+	assert.match(ui.html, /\.commit-progress\[hidden\]\s*\{\s*display:\s*block;\s*visibility:\s*hidden/);
+	assert.match(ui.html, /\.commit-progress\[hidden\]::before\s*\{\s*animation:\s*none/);
+});
+
+test('collapsing Commits during a Base action keeps progress visible without fetching history', () => {
+	const ui = webview();
+	const source = 'a'.repeat(40);
+	ui.state({ type: 'state', branches: [], base: 'parent', compareCommit: source });
+	assert.equal(ui.get('commit-progress').hidden, true);
+	ui.state({ type: 'baseActionStart', id: 1, sourceCommit: source, preview: 'b'.repeat(40) });
+	ui.get('commit-toggle').listeners.click();
+	const request = ui.messages.findLast((message) => message.type === 'loadCommits');
+	ui.state({ ...request, type: 'commitPage', commits: [] });
+	ui.get('commit-toggle').listeners.click();
+	assert.equal(ui.get('commit-progress').hidden, false);
+	const requests = ui.messages.filter((message) => message.type === 'loadCommits').length;
+	ui.state({ type: 'baseActionEnd', id: 1, ok: true, base: 'b'.repeat(40) });
+	assert.equal(ui.get('commit-progress').hidden, true);
+	assert.equal(ui.messages.filter((message) => message.type === 'loadCommits').length, requests);
+});
+
+test('new source state cancels cached preview and ignores completion of the previous action', () => {
+	const ui = webview();
+	const source = 'a'.repeat(40);
+	ui.state({ type: 'state', branches: [], base: 'b'.repeat(40), compareCommit: source,
+		automaticBaseHint: { base: 'parent', baselineCommit: 'c'.repeat(40) } });
+	ui.get('unpin-base').listeners.click();
+	ui.state({ type: 'baseActionStart', id: 1, sourceCommit: source, preview: 'parent' });
+	ui.state({ type: 'state', branches: [], base: 'new-parent', compareCommit: 'd'.repeat(40) });
+	ui.state({ type: 'baseActionEnd', id: 1, ok: true, base: 'parent' });
+	assert.equal(ui.get('.branch-input[data-row="base"]').value, 'new-parent');
+	assert.equal(ui.get('commit-progress').hidden, true);
+	assert.equal(ui.get('unpin-base').disabled, false);
+});
 test('Review invalidates on a baseline pin change even when the target tip stays unchanged', () => {
 	const ui = webview();
 	const source = 'a'.repeat(40), target = 'b'.repeat(40), first = 'c'.repeat(40), second = 'd'.repeat(40);

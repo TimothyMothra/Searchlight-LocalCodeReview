@@ -37,6 +37,21 @@ export class ActiveComparison {
 	baselineReason = '';
 	baselineError?: string;
 	private resolveVersion = 0;
+	private automaticCache?: {
+		repo: string; source: string; sourceCommit: string; base: string;
+		targetCommit: string; baselineCommit: string; explanation?: string; generation: number;
+	};
+	private automaticCacheGeneration = 0;
+
+	/** A display hint only; cached commit IDs are validated before reuse. */
+	get automaticBaseHint(): { base: string; baselineCommit: string } | undefined {
+		const cache = this.automaticCache;
+		return cache && cache.repo === this.repoRootFsPath && cache.source === this.compare &&
+			cache.sourceCommit === this.compareCommit
+			? { base: cache.base, baselineCommit: cache.baselineCommit } : undefined;
+	}
+
+	invalidateAutomaticBaseCache(): void { ++this.automaticCacheGeneration; }
 
 	/** Compatibility name for the effective baseline used by the embedded history markers. */
 	get mergeBaseCommit(): string | undefined { return this.baselineCommit; }
@@ -173,6 +188,7 @@ export class ActiveComparison {
 
 	private async resolveCore(): Promise<void> {
 		const version = ++this.resolveVersion;
+		const cacheGeneration = this.automaticCacheGeneration;
 		// HEAD must be resolved BEFORE the commits: auto-follow below can change `compare`, and
 		// resolving `compareCommit` from a stale branch name would show the new branch with the old
 		// commit. Apply the resolved comparison atomically after all queries complete.
@@ -258,6 +274,13 @@ export class ActiveComparison {
 		this.baselineError = baselineError;
 		this.reviewDir = paths.reviewDir;
 		this.sourceFile = paths.sourceFile;
+		if (!baseExplicit && !pin && baseline && compareCommit) {
+			this.automaticCache = {
+				repo: this.repoRootFsPath, source: compare, sourceCommit: compareCommit, base,
+				targetCommit: baseline.targetCommit, baselineCommit: baseline.commit, explanation: baseExplanation,
+				generation: cacheGeneration,
+			};
+		}
 		if (existing) {
 			// Ensure the runtime-only path is populated (parseReview sets it from the file uri).
 			existing.sourceFile = this.sourceFile;
@@ -304,8 +327,18 @@ export class ActiveComparison {
 
 	/** Pin a base branch or immutable commit and re-resolve. */
 	async setBase(base: string): Promise<void> {
+		return trace('comparison.setBase', () => this.setBaseCore(base),
+			{ kind: /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(base) ? 'commit' : 'branch' });
+	}
+
+	private async setBaseCore(base: string): Promise<void> {
+		const { compare, repoRootFsPath } = this;
+		const version = this.resolveVersion;
 		if (!await resolveCommit(this.repoRootFsPath, base)) {
 			throw new Error(`Cannot resolve base ${base} to a commit.`);
+		}
+		if (version !== this.resolveVersion || compare !== this.compare || repoRootFsPath !== this.repoRootFsPath) {
+			throw new Error('The comparison changed while selecting its Base. Try again.');
 		}
 		this.invalidateBaseline();
 		this.base = base;
@@ -321,10 +354,27 @@ export class ActiveComparison {
 
 	/** Remove this source's fixed override and return to the same discovery used by defaults. */
 	async useAutomaticBase(): Promise<void> {
+		return trace('comparison.unpinResolve', () => this.useAutomaticBaseCore());
+	}
+
+	private async useAutomaticBaseCore(): Promise<void> {
 		const { base, compare } = this;
 		if (!compare) { throw new Error('Select a source before returning to automatic Base selection.'); }
 		const version = ++this.resolveVersion;
-		const suggestion = await this.automaticBase(compare);
+		let suggestion: BaseSuggestion | undefined;
+		const cache = this.automaticCache;
+		if (this.automaticBaseHint && cache && cache.generation === this.automaticCacheGeneration) {
+			const [sourceCommit, targetCommit] = await trace('comparison.automaticCacheValidate', () => Promise.all([
+				resolveCommit(this.repoRootFsPath, compare), resolveCommit(this.repoRootFsPath, cache.base),
+			]));
+			// ASSUMPTION: ref events during validation invalidate the candidate, not just the display.
+			if (cache.generation === this.automaticCacheGeneration &&
+				sourceCommit === cache.sourceCommit && targetCommit === cache.targetCommit) {
+				suggestion = { branch: cache.base, explanation: cache.explanation ?? 'Suggested target: validated automatic cache.' };
+			}
+		}
+		event('comparison.automaticCache', { hit: !!suggestion });
+		suggestion ??= await this.automaticBase(compare);
 		if (!suggestion.branch) { throw new Error('No automatic Base is available. Select a branch or a History commit.'); }
 		const overtaken = () => version !== this.resolveVersion || base !== this.base || compare !== this.compare;
 		if (overtaken()) { throw new Error('The comparison changed while detecting its Base. Try again.'); }

@@ -115,6 +115,18 @@ The **Effective baseline** is the exact commit used on the left of branch-review
   source and reruns automatic target discovery plus shared-ancestor resolution. It does not force
   `main`, leave the SHA target selected, or clear other sources' preferences. Reloads remain automatic.
   The redundant pinned-commit caption is omitted; the hash is already in the input and commit list.
+- **Pending Base feedback:** pin previews the chosen SHA immediately. Warm Unpin previews the
+  last successful automatic target from memory, then validates source/target IDs before skipping
+  target rediscovery. Ref events/manual refresh invalidate reuse; the preview is not a diff boundary.
+  Baseline and review data are always re-resolved. Cache hints are scoped to the repo and source
+  SHA, are not persisted across reloads, and fall back to discovery when unavailable/changed.
+  A themed horizontal progress bar runs above Commits during the action and any open Review reload.
+  Like VS Code's native progress bar, this essential activity cue continues animating under reduced
+  motion; it does not change OS/editor settings.
+  Its narrow bit uses the native four-second translate/scale sweep. The 2px slot remains reserved
+  when idle; only its visibility changes, so commit rows do not shift during loading.
+  Collapsed commit sections are not forced to load. Failed actions restore authoritative input
+  state and surface the error; stale source/action responses cannot overwrite a newer choice.
 - Multiple valid merge-bases use Git's normal default selection, matching the approved automatic
   workflow. This does not claim that the chosen ancestor is a unique original fork point.
 - Missing refs, no shared ancestry, and incomparable candidate baselines
@@ -123,6 +135,12 @@ The **Effective baseline** is the exact commit used on the left of branch-review
 The Base input tooltip includes the baseline SHA and reason, without an extra baseline row. Target selections are
 remembered per source branch in workspace state; review folder names and `comments.json` target
 identity do not change when Auto chooses an upstream's shared ancestor.
+Successful Suggested/Default target captions are omitted; their details remain in the Base tooltip.
+Discovery or resolution failures still appear explicitly in the status area.
+Unselected or temporarily resolving comparisons remain quiet instead of showing an instructional
+prompt. Commit rows and Changed Files folders use right-facing disclosure arrows when collapsed
+and down-facing arrows when expanded, matching the pane and Commits-section headers. Both lists'
+disclosure SVGs inherit the themed icon foreground rather than the SVG default black fill.
 
 This handles both an advancing main branch (the shared ancestor stays put) and a rebased source
 with stale local main (a newer upstream ancestor can win). It does not guess a feature branch's

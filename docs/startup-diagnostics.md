@@ -96,6 +96,29 @@ Trace spans are **inclusive and may overlap**. Never add their durations to calc
 Use milestone `atMs` for elapsed latency and parent/child spans to explain it. A Git exit code can be
 an expected negative query result (for example, an ancestry check), not necessarily a product error.
 
+## Pin and Unpin latency
+
+Use the same **Output > Searchlight** log or exported report while `searchlight.perfLogging` is on.
+The original `[usage]` command start/completion events can estimate action time, but do not include
+all subsequent webview work. The following `[perf]` boundaries make the distinction explicit:
+
+| Signal | Measures |
+|---|---|
+| `comparison.pinAction` / `comparison.unpinAction` | Host action through resolved selector-state construction; `actionId` pairs feedback/content acknowledgements |
+| `comparison.setBase` / `comparison.unpinResolve` | Model mutation and fresh comparison resolution |
+| `comparison.automaticCacheValidate` / `comparison.automaticCache` | Fresh source/target checks and cache hit/miss; a hit skips discovery, not baseline validation |
+| `comparison.targetDiscovery` / `baseline.resolve` / `comparison.resolve` | Discovery, shared ancestry and total resolution dependencies |
+| `comparison.baseFeedbackDom` | Preview DOM update; host elapsed time since action start plus client mutation duration |
+| `comparison.baseSelectorDom` | Authoritative textbox settlement after the action, including when Commits stays collapsed |
+| `comparison.baseContentDom` | Open commit-tree DOM settlement after action completion and any pending page reload |
+
+Compare warm pin/unpin cycles with a cold Unpin after reload or ref invalidation. Immediate client
+preview from the cached state precedes the host message when the button is clicked; the feedback
+acknowledgement measures the host-delivered update, not the OS click timestamp. Timings are DOM
+completion, not guaranteed compositor paint. A closed commit tree has no content acknowledgement
+until it is opened; it is not loaded just to produce timing data. These records include only action
+kinds/IDs, cache outcomes, and elapsed times, never target names, SHAs or review text.
+
 ## Limits and overhead
 
 `contentPaintOpportunity` is deliberately not called "first paint": animation frames cannot prove

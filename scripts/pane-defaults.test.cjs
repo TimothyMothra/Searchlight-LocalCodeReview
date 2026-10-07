@@ -65,6 +65,20 @@ test('panes put collapsed combined Comparison above Files and Conversations', ()
 	assert.ok(manifest.contributes.commands.some((command) => command.command === 'searchlight.commitsViewAllChanges'));
 });
 
+test('Commits and Changed Files use downward artwork rotated right only when collapsed', () => {
+	const commits = require('../out/commitsWebview');
+	const f = fixture('filesWebview');
+	const provider = new f.exports.FilesWebviewProvider(() => undefined, {}, () => {}, f.memento);
+	const files = provider.html({ cspSource: 'fixture' });
+	for (const source of [commits.COMMITS_JS, files]) {
+		assert.match(source, /const CHEVRON_SVG = '<svg[^']+d="M4 6l4 4 4-4H4z"/);
+	}
+	assert.match(commits.COMMITS_CSS, /\.commit\.collapsed\s*>\s*\.commit-row\s+\.commit-twisty\s*\{\s*transform:\s*rotate\(-90deg\)/);
+	assert.match(files, /\.dir\.collapsed\s*>\s*\.row\s+\.twisty\s*\{\s*transform:\s*rotate\(-90deg\)/);
+	assert.match(files, /\.glyph svg,\s*\.twisty svg\s*\{[^}]*fill:\s*currentColor/);
+	assert.match(files, /\.twisty\s*\{[^}]*color:\s*var\(--vscode-icon-foreground\)/);
+});
+
 test('Files sends an expanded initial tree, while explicit expansion commands remain authoritative', async () => {
 	const f = fixture('filesWebview');
 	const provider = new f.exports.FilesWebviewProvider(() => undefined, {}, () => {}, f.memento);
